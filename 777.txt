@@ -1,11 +1,9 @@
 /**
  * 澳门六合彩预测机器人 (Macau Mark Six Prediction Bot)
  * 版本: V6.0 Enterprise Enhanced Edition (增强版) - 批量复盘修复版
- * 新增功能:
- * 1. 批量复盘系统 (支持期号范围)
- * 2. 高级规律分析引擎 (多种规律检测)
- * 3. 平码预测功能
- * 4. 批量学习优化
+ * 修复内容:
+ * 1. 移除预览预测中的平码预测按钮
+ * 2. 修复查看详情按钮点击无反应的问题
  * 
  * ==============================================================================
  * 核心功能清单:
@@ -1712,8 +1710,7 @@ class PatternAnalyzer {
       zodiac: [],
       color: [],
       tail: [],
-      regular: [],
-      special: []
+      regular: []
     };
     
     const lastZodiac = this.getSpecialZodiac(lastRecord);
@@ -3122,12 +3119,12 @@ class BatchBacktestSystem {
 }
 
 // ==============================================================================
-// 9. 消息渲染器 (UI Renderer)
+// 9. 消息渲染器 (UI Renderer) - 修复版
 // ==============================================================================
 
 class MessageRenderer {
   /**
-   * 渲染预测预览消息
+   * 渲染预测预览消息 - 修复：移除平码预测按钮
    */
   static renderPreview(prediction, task = null, includeRefresh = false, weights = null) {
     const refreshButton = includeRefresh ? `\n\n🔄 点击下方按钮刷新预测` : '';
@@ -3222,8 +3219,7 @@ ${refreshButton}
         keyboard: {
           inline_keyboard: [[
             { text: `${CONFIG.EMOJI.sync} 刷新预测结果`, callback_data: "refresh_preview" },
-            { text: `${CONFIG.EMOJI.chart} 查看详情`, callback_data: "view_details" },
-            { text: `${CONFIG.EMOJI.regular} 平码预测`, callback_data: "view_regular" }
+            { text: `${CONFIG.EMOJI.chart} 查看详情`, callback_data: "view_details" }
           ]]
         }
       };
@@ -3319,8 +3315,7 @@ ${Object.entries(prediction.usedWeights || {}).filter(([key]) => !key.startsWith
       text: details,
       keyboard: {
         inline_keyboard: [[
-          { text: "🔙 返回预测", callback_data: "back_to_preview" },
-          { text: `${CONFIG.EMOJI.regular} 平码预测`, callback_data: "view_regular" }
+          { text: "🔙 返回预测", callback_data: "back_to_preview" }
         ]]
       }
     };
@@ -3385,7 +3380,7 @@ ${Object.entries(prediction.usedWeights || {}).filter(([key]) => !key.startsWith
       text: message,
       keyboard: {
         inline_keyboard: [[
-          { text: "🔙 返回特码预测", callback_data: "back_to_preview" }
+          { text: "🔙 返回主菜单", callback_data: "back_to_menu" }
         ]]
       }
     };
@@ -4114,7 +4109,7 @@ class ExternalService {
 }
 
 // ==============================================================================
-// 11. 业务逻辑控制器 (Business Logic Controllers)
+// 11. 业务逻辑控制器 (Business Logic Controllers) - 修复版
 // ==============================================================================
 
 class Controller {
@@ -4202,7 +4197,7 @@ class Controller {
   }
 
   /**
-   * 处理预测预览
+   * 处理预测预览 - 修复：确保任务中有预测数据
    */
   static async handlePreview(env, chatId, messageId = null) {
     try {
@@ -4261,13 +4256,17 @@ class Controller {
         const determinants = MathEngine.analyzeDeterminants(allHistory);
         prediction = PredictionEngine.generate(task, historicalAnalysis, weights, determinants, patterns);
         
-        // 如果任务已完成，保存预测结果
+        // 保存预测到任务中（无论是否完成）
+        task.finalPrediction = prediction;
+        
+        // 如果任务已完成，归档
         if (task.status === "DONE") {
-          task.finalPrediction = prediction;
-          await DB.saveTask(env, task);
           await DB.archivePrediction(env, task.expect, prediction);
           Logger.info("Preview", `预测完成并保存: ${task.expect}`);
         }
+        
+        // 保存任务
+        await DB.saveTask(env, task);
       }
 
       // 渲染消息
@@ -5590,11 +5589,11 @@ class Controller {
 }
 
 // ==============================================================================
-// 12. 事件处理器 (Event Handlers)
+// 12. 事件处理器 (Event Handlers) - 修复版
 // ==============================================================================
 
 /**
- * 处理回调查询（按钮点击）
+ * 处理回调查询（按钮点击）- 修复：确保查看详情按钮正常工作
  */
 async function handleCallback(env, query) {
   const data = query.data;
@@ -5617,18 +5616,16 @@ async function handleCallback(env, query) {
       await Controller.handlePreview(env, chatId, messageId);
       
     } else if (data === 'view_details') {
-      // 查看预测详情
+      // 查看预测详情 - 修复：确保能获取到预测数据
       const task = await DB.getTask(env);
       if (task && task.finalPrediction) {
         const details = MessageRenderer.renderPredictionDetails(task.finalPrediction);
         await ExternalService.editMessage(env, chatId, messageId, details.text, details.keyboard);
       } else {
-        await ExternalService.answerCallbackQuery(env, query.id, "暂无预测详情", true);
+        // 如果没有预测数据，重新生成一个预览
+        await ExternalService.answerCallbackQuery(env, query.id, "正在生成预测详情...", false);
+        await Controller.handlePreview(env, chatId, messageId);
       }
-      
-    } else if (data === 'view_regular') {
-      // 查看平码预测
-      await Controller.handleRegularPrediction(env, chatId);
       
     } else if (data === 'back_to_preview') {
       // 返回预测预览
@@ -5642,6 +5639,10 @@ async function handleCallback(env, query) {
     } else if (data === 'back_to_menu') {
       // 返回菜单
       await ExternalService.sendMessage(env, chatId, `📂 <b>${CONFIG.SYSTEM.NAME}</b> 主菜单`, KEYBOARDS.MAIN_MENU);
+      
+    } else if (data === 'view_regular') {
+      // 查看平码预测（从其他页面跳转）
+      await Controller.handleRegularPrediction(env, chatId);
       
     } else {
       // 未知回调
