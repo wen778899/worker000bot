@@ -1,0 +1,708 @@
+export default {
+    async fetch(request, env, ctx) {
+        const url = new URL(request.url);
+        const pathname = url.pathname;
+        
+        console.log(`[${new Date().toISOString()}] 请求路径: ${pathname}, 方法: ${request.method}`);
+        
+        // 处理 OPTIONS 请求（CORS 预检）
+        if (request.method === 'OPTIONS') {
+            return handleCORS();
+        }
+        
+        // 路由处理
+        if (pathname === '/init-db' && request.method === 'GET') {
+            return await handleInitDB(env);
+        }
+        
+        if (pathname === '/test-db' && request.method === 'GET') {
+            return await testDBConnection(env);
+        }
+        
+        if (pathname === '/telegram-webhook' && request.method === 'POST') {
+            return await handleTelegramWebhook(request, env);
+        }
+        
+        if (pathname === '/admin/import' && request.method === 'POST') {
+            return await handleAdminImport(request, env);
+        }
+        
+        if (pathname.startsWith('/history/')) {
+            return await handleHistoryAPI(request, env, pathname);
+        }
+        
+        if (pathname === '/health' || pathname === '/status') {
+            return await handleHealthCheck(env);
+        }
+        
+        if (pathname === '/test' || pathname === '/ping') {
+            return new Response(JSON.stringify({
+                status: 'ok',
+                message: 'Worker is running',
+                timestamp: new Date().toISOString(),
+                environment: {
+                    hasDB: !!env.DB,
+                    hasTelegramToken: !!env.TELEGRAM_BOT_TOKEN
+                }
+            }), {
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                }
+            });
+        }
+        
+        // 根路径返回 API 文档
+        return new Response(JSON.stringify({
+            result: true,
+            message: '彩票开奖记录 API',
+            endpoints: {
+                init_db: '/init-db (GET, 初始化数据库)',
+                test_db: '/test-db (GET, 测试数据库连接)',
+                health_check: '/health (GET, 健康检查)',
+                test: '/test (GET, 测试Worker)',
+                telegram_webhook: '/telegram-webhook (POST)',
+                history_api: '/history/{type}/y/{year}',
+                admin_import: '/admin/import (POST, 需要API密钥)'
+            },
+            examples: {
+                get_2025_history: '/history/macaujc2/y/2025',
+                get_current_year: '/history/macaujc2/y/' + new Date().getFullYear()
+            }
+        }, null, 2), {
+            headers: { 
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            }
+        });
+    }
+};
+
+// CORS 处理
+function handleCORS() {
+    return new Response(null, {
+        status: 204,
+        headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, Authorization',
+            'Access-Control-Max-Age': '86400'
+        }
+    });
+}
+
+// 测试数据库连接
+async function testDBConnection(env) {
+    try {
+        if (!env.DB) {
+            return jsonResponse({
+                result: false,
+                message: '数据库绑定不存在'
+            }, 500);
+        }
+        
+        // 测试1: 简单查询
+        console.log('测试1: 执行简单查询...');
+        const test1 = await env.DB.prepare('SELECT 1 as test_value').first();
+        
+        // 测试2: 查询现有表
+        console.log('测试2: 查询现有表...');
+        const test2 = await env.DB.prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).all();
+        
+        // 测试3: 查看数据库信息
+        console.log('测试3: 查看数据库信息...');
+        const test3 = await env.DB.prepare('PRAGMA database_list').all();
+        
+        // 测试4: 查看数据库大小
+        console.log('测试4: 查看数据库大小...');
+        const test4 = await env.DB.prepare('PRAGMA page_count').first();
+        
+        return jsonResponse({
+            result: true,
+            message: '数据库连接测试完成',
+            tests: {
+                simpleQuery: test1 ? '成功' : '失败',
+                existingTables: test2.results ? test2.results.map(t => t.name) : [],
+                databaseInfo: test3.results || [],
+                pageCount: test4 ? test4.page_count : '未知'
+            },
+            rawResults: {
+                test1,
+                test2: test2.results,
+                test3: test3.results,
+                test4
+            }
+        });
+    } catch (error) {
+        console.error('数据库连接测试失败:', error);
+        return jsonResponse({
+            result: false,
+            message: '数据库连接测试失败',
+            error: error.message,
+            stack: error.stack
+        }, 500);
+    }
+}
+
+// 数据库初始化
+async function handleInitDB(env) {
+    console.log('开始初始化数据库...');
+    
+    try {
+        if (!env.DB) {
+            return jsonResponse({
+                result: false,
+                message: '数据库绑定不存在',
+                error: 'DB binding not found',
+                solution: '请在Worker设置中添加DB变量绑定到D1数据库'
+            }, 500);
+        }
+        
+        // 先检查是否有表
+        const existingTables = await env.DB.prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='lottery_records'"
+        ).first();
+        
+        if (existingTables) {
+            console.log('表已存在，跳过创建');
+            return jsonResponse({
+                result: true,
+                message: '表已存在，无需重新创建',
+                existing: true
+            });
+        }
+        
+        // 创建表的SQL（简化版，避免错误）
+        const createTableSQL = `
+            CREATE TABLE lottery_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                expect TEXT UNIQUE NOT NULL,
+                openTime TEXT NOT NULL,
+                type TEXT DEFAULT 'macaujc2',
+                openCode TEXT NOT NULL,
+                zodiac TEXT,
+                verify INTEGER DEFAULT 0,
+                info TEXT DEFAULT 'macaujc.com 接口數據來源、邮件技術支持：service@macaujc.com',
+                createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `;
+        
+        console.log('执行创建表SQL...');
+        await env.DB.prepare(createTableSQL).run();
+        console.log('表创建成功');
+        
+        // 等待一下
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        // 创建索引
+        const indexSQLs = [
+            "CREATE INDEX idx_expect ON lottery_records(expect)",
+            "CREATE INDEX idx_openTime ON lottery_records(openTime)",
+            "CREATE INDEX idx_type ON lottery_records(type)"
+        ];
+        
+        const indexResults = [];
+        for (const sql of indexSQLs) {
+            try {
+                await env.DB.prepare(sql).run();
+                indexResults.push({ sql, success: true });
+                console.log('创建索引成功:', sql);
+            } catch (error) {
+                indexResults.push({ sql, success: false, error: error.message });
+                console.warn('创建索引失败:', error.message);
+            }
+        }
+        
+        // 验证表创建成功
+        const verifyTable = await env.DB.prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='lottery_records'"
+        ).first();
+        
+        // 尝试插入测试数据
+        let testResult = '未执行';
+        if (verifyTable) {
+            try {
+                const testData = {
+                    expect: `TEST${Date.now().toString().slice(-6)}`,
+                    openTime: new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ''),
+                    openCode: '01,02,03,04,05,06,07',
+                    zodiac: '鼠,牛,虎,兔,龍,蛇,馬'
+                };
+                
+                await env.DB.prepare(`
+                    INSERT INTO lottery_records (expect, openTime, openCode, zodiac)
+                    VALUES (?, ?, ?, ?)
+                `).bind(testData.expect, testData.openTime, testData.openCode, testData.zodiac).run();
+                
+                testResult = '测试数据插入成功';
+                console.log('测试数据插入成功');
+            } catch (insertError) {
+                testResult = `测试数据插入失败: ${insertError.message}`;
+                console.warn('测试数据插入失败:', insertError.message);
+            }
+        }
+        
+        // 获取所有表
+        const allTablesResult = await env.DB.prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).all();
+        const allTables = allTablesResult.results ? allTablesResult.results.map(t => t.name) : [];
+        
+        return jsonResponse({
+            result: true,
+            message: '数据库初始化完成',
+            details: {
+                tableCreated: !!verifyTable,
+                allTables: allTables,
+                indexes: indexResults,
+                testInsert: testResult
+            }
+        });
+        
+    } catch (error) {
+        console.error('数据库初始化失败:', error);
+        
+        return jsonResponse({
+            result: false,
+            message: '数据库初始化失败',
+            error: error.message,
+            troubleshooting: [
+                '1. 请先访问 /test-db 测试数据库连接',
+                '2. 在Cloudflare Dashboard中手动执行SQL',
+                '3. 检查数据库绑定是否正确'
+            ]
+        }, 500);
+    }
+}
+
+// 健康检查
+async function handleHealthCheck(env) {
+    try {
+        let dbStatus = 'unknown';
+        let dbError = null;
+        
+        if (env.DB) {
+            try {
+                const result = await env.DB.prepare('SELECT 1 as test').first();
+                dbStatus = result ? 'connected' : 'error';
+            } catch (error) {
+                dbStatus = 'error';
+                dbError = error.message;
+                console.error('数据库连接错误:', error);
+            }
+        } else {
+            dbStatus = 'no-binding';
+        }
+        
+        return jsonResponse({
+            status: 'ok',
+            timestamp: new Date().toISOString(),
+            services: {
+                worker: 'running',
+                database: dbStatus,
+                telegram: env.TELEGRAM_BOT_TOKEN ? 'configured' : 'not-configured'
+            },
+            environment: {
+                hasDB: !!env.DB,
+                hasTelegramToken: !!env.TELEGRAM_BOT_TOKEN,
+                hasAdminId: !!env.TELEGRAM_ADMIN_ID,
+                hasApiKey: !!env.ADMIN_API_KEY
+            },
+            error: dbError
+        });
+    } catch (error) {
+        return jsonResponse({
+            status: 'error',
+            error: error.message,
+            timestamp: new Date().toISOString()
+        }, 500);
+    }
+}
+
+// Telegram Webhook 处理
+async function handleTelegramWebhook(request, env) {
+    try {
+        const update = await request.json();
+        console.log('收到Telegram消息:', JSON.stringify(update, null, 2));
+        
+        // 处理频道消息
+        if (update.channel_post) {
+            const message = update.channel_post;
+            await processLotteryMessage(message, env);
+        }
+        
+        // 处理管理员私聊
+        if (update.message && update.message.from.id.toString() === env.TELEGRAM_ADMIN_ID) {
+            await processAdminMessage(update.message, env);
+        }
+        
+        return new Response('OK');
+    } catch (error) {
+        console.error('Telegram webhook错误:', error);
+        return new Response('Error', { status: 500 });
+    }
+}
+
+// 处理彩票消息
+async function processLotteryMessage(message, env) {
+    try {
+        const text = message.text || '';
+        console.log('处理消息:', text);
+        
+        // 解析格式：香港六合彩第:2025127期开奖结果:
+        // 06  40  04  34  26  28  25
+        // 鼠  虎  虎  猴  龍  虎  蛇
+        
+        const lines = text.split('\n').map(line => line.trim()).filter(line => line);
+        
+        if (lines.length < 3) {
+            console.log('消息格式无效');
+            return;
+        }
+        
+        // 解析期号
+        const expectMatch = lines[0].match(/第:?(\d{7})期/);
+        if (!expectMatch) {
+            console.log('未找到期号');
+            return;
+        }
+        
+        const expect = expectMatch[1];
+        console.log('期号:', expect);
+        
+        // 解析开奖号码（第二行）
+        const numbersLine = lines[1];
+        const numbers = numbersLine.trim().split(/\s+/).map(num => {
+            return num.padStart(2, '0');
+        });
+        
+        if (numbers.length !== 7) {
+            console.log('号码数量无效:', numbers.length);
+            return;
+        }
+        
+        const openCode = numbers.join(',');
+        console.log('开奖号码:', openCode);
+        
+        // 解析生肖（第三行）
+        const zodiacLine = lines[2];
+        const zodiacs = zodiacLine.trim().split(/\s+/);
+        const zodiac = zodiacs.join(',');
+        console.log('生肖:', zodiac);
+        
+        // 检查是否已存在
+        const existing = await env.DB.prepare(
+            'SELECT id FROM lottery_records WHERE expect = ?'
+        ).bind(expect).first();
+        
+        if (existing) {
+            console.log('记录已存在:', expect);
+            return;
+        }
+        
+        // 开奖时间
+        const openTime = new Date(message.date * 1000).toISOString()
+            .replace('T', ' ')
+            .replace(/\.\d{3}Z$/, '');
+        
+        // 插入数据库
+        await env.DB.prepare(`
+            INSERT INTO lottery_records (expect, openTime, openCode, zodiac, verify)
+            VALUES (?, ?, ?, ?, ?)
+        `).bind(expect, openTime, openCode, zodiac, false).run();
+        
+        console.log('记录保存成功:', expect);
+        
+        // 发送确认消息给管理员
+        if (env.TELEGRAM_ADMIN_ID && env.TELEGRAM_BOT_TOKEN) {
+            const botResponse = `✅ 保存开奖记录成功\n期号：${expect}\n号码：${openCode}\n时间：${openTime}`;
+            await sendTelegramMessage(env.TELEGRAM_ADMIN_ID, botResponse, env.TELEGRAM_BOT_TOKEN);
+        }
+        
+    } catch (error) {
+        console.error('处理彩票消息错误:', error);
+    }
+}
+
+// 处理管理员消息
+async function processAdminMessage(message, env) {
+    const text = message.text.trim();
+    const chatId = message.chat.id;
+    
+    const commands = {
+        '/start': '欢迎使用彩票开奖记录Bot！\n\n可用命令：\n/list - 查看最新记录\n/stats - 统计数据\n/help - 帮助信息',
+        
+        '/list': async () => {
+            const records = await env.DB.prepare(
+                'SELECT expect, openTime, openCode FROM lottery_records ORDER BY expect DESC LIMIT 10'
+            ).all();
+            
+            if (!records.results || records.results.length === 0) {
+                return '暂无开奖记录';
+            }
+            
+            let response = '📋 最新10期开奖记录：\n\n';
+            records.results.forEach((record, index) => {
+                response += `${index + 1}. 期号：${record.expect}\n`;
+                response += `   时间：${record.openTime}\n`;
+                response += `   号码：${record.openCode}\n\n`;
+            });
+            
+            return response;
+        },
+        
+        '/stats': async () => {
+            const total = await env.DB.prepare('SELECT COUNT(*) as count FROM lottery_records').first();
+            const latest = await env.DB.prepare(
+                'SELECT expect, openTime FROM lottery_records ORDER BY openTime DESC LIMIT 1'
+            ).first();
+            
+            const byYear = await env.DB.prepare(`
+                SELECT 
+                    strftime('%Y', openTime) as year,
+                    COUNT(*) as count
+                FROM lottery_records 
+                GROUP BY strftime('%Y', openTime)
+                ORDER BY year DESC
+            `).all();
+            
+            let response = '📊 数据统计\n\n';
+            response += `总记录数：${total ? total.count : 0}\n\n`;
+            
+            if (byYear.results && byYear.results.length > 0) {
+                response += '按年统计：\n';
+                byYear.results.forEach(stat => {
+                    response += `  ${stat.year}年：${stat.count}期\n`;
+                });
+            }
+            
+            if (latest) {
+                response += `\n最新一期：${latest.expect}\n`;
+                response += `开奖时间：${latest.openTime}`;
+            }
+            
+            return response;
+        },
+        
+        '/help': '可用命令：\n/list - 查看最新记录\n/stats - 统计数据\n/help - 帮助信息'
+    };
+    
+    // 查找匹配的命令
+    for (const [command, handler] of Object.entries(commands)) {
+        if (text.startsWith(command)) {
+            try {
+                let response;
+                if (typeof handler === 'function') {
+                    response = await handler();
+                } else {
+                    response = handler;
+                }
+                
+                await sendTelegramMessage(chatId, response, env.TELEGRAM_BOT_TOKEN);
+            } catch (error) {
+                console.error('命令执行错误:', error);
+                await sendTelegramMessage(chatId, '命令执行出错: ' + error.message, env.TELEGRAM_BOT_TOKEN);
+            }
+            break;
+        }
+    }
+}
+
+// 历史数据 API
+async function handleHistoryAPI(request, env, pathname) {
+    try {
+        // 解析路径：/history/macaujc2/y/2025
+        const parts = pathname.split('/');
+        
+        if (parts.length < 5) {
+            return jsonResponse({
+                result: false,
+                message: '路径格式错误，应为: /history/{type}/y/{year}',
+                code: 400
+            }, 400);
+        }
+        
+        const type = parts[2];
+        const year = parts[4];
+        
+        if (!/^\d{4}$/.test(year)) {
+            return jsonResponse({
+                result: false,
+                message: '年份格式错误，应为4位数字',
+                code: 400
+            }, 400);
+        }
+        
+        // 查询数据
+        const query = env.DB.prepare(`
+            SELECT 
+                expect,
+                strftime('%Y-%m-%d %H:%M:%S', openTime) as openTime,
+                type,
+                openCode,
+                zodiac,
+                verify,
+                info
+            FROM lottery_records 
+            WHERE strftime('%Y', openTime) = ?
+            ORDER BY expect DESC
+        `).bind(year);
+        
+        const records = await query.all();
+        
+        // 格式化返回数据
+        const formattedData = (records.results || []).map(record => ({
+            expect: record.expect,
+            openTime: record.openTime,
+            type: record.type || '8',
+            openCode: record.openCode,
+            wave: null,
+            zodiac: record.zodiac || '',
+            oddEven: null,
+            allOddEven: null,
+            bigSmall: null,
+            allBigSmall: null,
+            firstsecend: 0,
+            left3: null,
+            mid3: null,
+            right3: null,
+            pet: null,
+            pk: null,
+            vs: null,
+            verify: record.verify || false,
+            info: record.info || 'macaujc.com 接口數據來源、邮件技術支持：service@macaujc.com'
+        }));
+        
+        return jsonResponse({
+            result: true,
+            message: '操作成功！',
+            code: 200,
+            data: formattedData,
+            timestamp: Date.now()
+        });
+        
+    } catch (error) {
+        console.error('历史API错误:', error);
+        return jsonResponse({
+            result: false,
+            message: '服务器内部错误',
+            code: 500,
+            error: error.message
+        }, 500);
+    }
+}
+
+// 管理员导入接口
+async function handleAdminImport(request, env) {
+    try {
+        // 验证 API 密钥
+        const apiKey = request.headers.get('X-API-Key');
+        if (apiKey !== env.ADMIN_API_KEY) {
+            return jsonResponse({
+                result: false,
+                message: '未授权的访问',
+                code: 401
+            }, 401);
+        }
+        
+        const data = await request.json();
+        
+        if (!Array.isArray(data)) {
+            return jsonResponse({
+                result: false,
+                message: '数据格式错误，应为数组',
+                code: 400
+            }, 400);
+        }
+        
+        let successCount = 0;
+        let errorCount = 0;
+        const errors = [];
+        
+        for (const record of data) {
+            try {
+                if (!record.expect || !record.openCode) {
+                    errorCount++;
+                    errors.push(`记录缺少必要字段: ${JSON.stringify(record)}`);
+                    continue;
+                }
+                
+                await env.DB.prepare(`
+                    INSERT OR REPLACE INTO lottery_records 
+                    (expect, openTime, openCode, zodiac, verify, info)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                `).bind(
+                    record.expect,
+                    record.openTime || new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ''),
+                    record.openCode,
+                    record.zodiac || '',
+                    record.verify || false,
+                    record.info || 'macaujc.com 接口數據來源、邮件技術支持：service@macaujc.com'
+                ).run();
+                
+                successCount++;
+            } catch (error) {
+                errorCount++;
+                errors.push(`${record.expect}: ${error.message}`);
+                console.error('导入记录错误:', error);
+            }
+        }
+        
+        return jsonResponse({
+            result: true,
+            message: `数据导入完成，成功：${successCount}，失败：${errorCount}`,
+            code: 200,
+            summary: {
+                total: data.length,
+                success: successCount,
+                error: errorCount
+            },
+            errors: errors.length > 0 ? errors : undefined
+        });
+        
+    } catch (error) {
+        console.error('导入API错误:', error);
+        return jsonResponse({
+            result: false,
+            message: '导入失败',
+            code: 500,
+            error: error.message
+        }, 500);
+    }
+}
+
+// 发送 Telegram 消息
+async function sendTelegramMessage(chatId, text, botToken) {
+    try {
+        const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+        
+        await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: chatId,
+                text: text,
+                parse_mode: 'HTML'
+            })
+        });
+    } catch (error) {
+        console.error('发送Telegram消息错误:', error);
+    }
+}
+
+// 辅助函数：JSON响应
+function jsonResponse(data, status = 200) {
+    return new Response(JSON.stringify(data, null, 2), {
+        status: status,
+        headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
+            'Cache-Control': 'public, max-age=300'
+        }
+    });
+}
