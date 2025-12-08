@@ -1,5 +1,5 @@
 /**
- * 澳门六合彩预测机器人 (Macau Mark Six Prediction Bot)
+ * 香港六合彩预测机器人 (Hong Kong Mark Six Prediction Bot)
  * 版本: V12.3 增强统计算法优化版 - 完全修复与优化版
  * 
  * 主要修复与改进:
@@ -21,7 +21,7 @@
 
 const CONFIG = {
   SYSTEM: {
-    NAME: "🇲🇴 澳六预测",
+    NAME: "🇭🇰 香港六合彩预测",
     VERSION: "V12.3 增强统计算法优化版 - 完全修复与优化版",
     TIMEZONE_OFFSET: 8,
     HISTORY_LIMIT: 2000,
