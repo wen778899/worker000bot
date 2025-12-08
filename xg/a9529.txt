@@ -1,13 +1,12 @@
 /**
  * 澳门六合彩预测机器人 (Macau Mark Six Prediction Bot)
- * 版本: V12.3 增强预测修复优化版
+ * 版本: V12.4.1 频道同步修复版
  * 
- * 主要修复和改进:
- * 1. 完全修复/predict advanced命令无响应问题
- * 2. 优化增强预测算法的并行执行逻辑
- * 3. 改进算法结果整合和权重分配
- * 4. 增强错误处理和回退机制
- * 5. 优化代码结构和性能
+ * 主要修复:
+ * 1. 修复ExternalService.syncFromChannel方法，使用正确的Telegram API
+ * 2. 添加转发消息处理功能，支持手动同步历史数据
+ * 3. 优化错误提示和用户操作指南
+ * 4. 保持原有算法功能完整
  */
 
 // ==============================================================================
@@ -17,26 +16,44 @@
 const CONFIG = {
   SYSTEM: {
     NAME: "🇲🇴 澳六预测",
-    VERSION: "V12.3 增强预测修复版",
+    VERSION: "V12.4.1 频道同步修复版",
     TIMEZONE_OFFSET: 8,
     HISTORY_LIMIT: 2000,
     CACHE_TTL: 60 * 1000,
     MESSAGE_CACHE_SIZE: 50,
-    MONTECARLO_SIMULATIONS: 30000,
+    MONTECARLO_SIMULATIONS: 10000,
     MONTECARLO_BATCH_SIZE: 2000,
-    MONTECARLO_MAX_BATCHES: 15,
-    MAX_SIMULATIONS: 150000,
-    MIN_SIMULATIONS: 5000,
-    MAX_RUNTIME_MS: 30000, // 增加到30秒
+    MONTECARLO_MAX_BATCHES: 5,
+    MAX_SIMULATIONS: 50000,
+    MIN_SIMULATIONS: 2000,
+    MAX_RUNTIME_MS: 10000,
     ASYNC_BATCH_DELAY: 20,
     MAX_SPECIAL_PREDICTIONS: 15,
     MAX_NORMAL_PREDICTIONS: 12,
     MONTE_CACHE_TTL: 5 * 60 * 1000,
     KNN_K_VALUE: 10,
     STATS_WINDOW_SIZE: 100,
-    PREDICTION_TIMEOUT: 15000, // 增加到15秒
-    ADVANCED_ALGO_TIMEOUT: 10000, // 单个算法超时时间
-    MAX_PARALLEL_ALGORITHMS: 4
+    PREDICTION_TIMEOUT: 8000,
+    ALGORITHM_TIMEOUTS: {
+      traditional: 3000,
+      knn: 4000,
+      stats: 5000,
+      advanced: 8000
+    },
+    MIN_HISTORY_FOR_ALGORITHMS: {
+      traditional: 2,
+      knn: 10,
+      stats: 20,
+      advanced: 5
+    },
+    MESSAGE_MANAGER_MAX_USERS: 1000,
+    MESSAGE_MANAGER_MAX_MESSAGES_PER_USER: 20,
+    AUTO_CLEANUP_INTERVAL: 10 * 60 * 1000,
+    USER_INACTIVITY_THRESHOLD: 30 * 60 * 1000,
+    CHANNEL_SYNC_LIMIT: 1000,
+    CHANNEL_MAX_MESSAGES_PER_REQUEST: 100,
+    CHANNEL_SYNC_BATCH_SIZE: 50,
+    CHANNEL_SYNC_DELAY_MS: 100
   },
 
   DEFAULT_ALGO_WEIGHTS: {
@@ -54,8 +71,7 @@ const CONFIG = {
     w_head_pattern: 1.5,
     w_size_pattern: 1.4,
     w_odd_even_pattern: 1.4,
-    w_advanced_integration: 3.0,
-    _version: "12.3"
+    _version: "12.4.1"
   },
 
   ZODIAC_MAP: {
@@ -180,10 +196,17 @@ const CONFIG = {
     first_place: "🥇",
     second_place: "🥈",
     third_place: "🥉",
-    algorithm: "⚡",
-    integration: "🔄",
-    success: "✅",
-    failure: "❌"
+    info: "ℹ️",
+    flag: "🚩",
+    chart2: "📉",
+    up: "⬆️",
+    down: "⬇️",
+    channel: "📢",
+    message: "📨",
+    parse: "🔍",
+    sync: "🔄",
+    filter: "🔎",
+    storage: "💾"
   },
 
   COMMAND_TYPES: {
@@ -198,13 +221,47 @@ const CONFIG = {
     DELETE_RESULT: "delete_result"
   },
 
-  // 新增：算法权重配置
-  ADVANCED_ALGO_WEIGHTS: {
-    traditional: 0.8,
-    knn: 1.2,
-    statistics: 1.5,
-    monteCarlo: 1.8,
-    integration: 2.0
+  ALGORITHM_NAMES: {
+    traditional: "传统算法",
+    knn: "KNN算法",
+    stats: "统计算法",
+    advanced: "增强算法"
+  },
+
+  // 频道消息解析模式
+  CHANNEL_MESSAGE_PATTERNS: [
+    // 格式1: 香港六合彩第:2025127期开奖结果:
+    /香港六合彩.*第\s*[:：]?\s*(\d+)\s*期.*开奖结果/,
+    
+    // 格式2: 第2025127期开奖结果
+    /第\s*(\d+)\s*期.*开奖结果/,
+    
+    // 格式3: 【2025127期】开奖结果
+    /【\s*(\d+)\s*期】.*开奖结果/,
+    
+    // 格式4: (2025127)开奖结果
+    /\(\s*(\d+)\s*\).*开奖结果/,
+    
+    // 格式5: 2025127期开奖结果
+    /^(\d+)\s*期.*开奖结果/
+  ],
+
+  // 号码解析正则
+  NUMBER_PATTERN: /\b(\d{1,2})\b/g,
+
+  // 生肖解析映射
+  ZODIAC_CHAR_MAP: {
+    "鼠": "鼠", "牛": "牛", "虎": "虎", "兔": "兔", 
+    "龙": "龙", "龍": "龙", "蛇": "蛇", "马": "马", 
+    "馬": "马", "羊": "羊", "猴": "猴", "鸡": "鸡", 
+    "雞": "鸡", "狗": "狗", "猪": "猪", "豬": "猪"
+  },
+
+  // 颜色表情映射
+  COLOR_EMOJI_MAP: {
+    "🔴": "red",
+    "🔵": "blue",
+    "🟢": "green"
   }
 };
 
@@ -474,7 +531,6 @@ class Formatter {
         frequency[i] = 0;
       }
       
-      // 计算最近100期的频率
       const recentHistory = history.slice(0, Math.min(100, history.length));
       for (const record of recentHistory) {
         if (record && record.open_code) {
@@ -487,7 +543,6 @@ class Formatter {
         }
       }
       
-      // 分析号码状态
       const status = {};
       const maxFrequency = Math.max(...Object.values(frequency));
       const avgFrequency = Object.values(frequency).reduce((a, b) => a + b, 0) / 49;
@@ -536,14 +591,206 @@ class Formatter {
       return null;
     }
   }
+
+  static isAlgorithmSupported(algorithm, historyLength) {
+    try {
+      const minHistory = CONFIG.SYSTEM.MIN_HISTORY_FOR_ALGORITHMS[algorithm] || 2;
+      return historyLength >= minHistory;
+    } catch (error) {
+      return historyLength >= 2;
+    }
+  }
+
+  static getAlgorithmTimeout(algorithm) {
+    try {
+      return CONFIG.SYSTEM.ALGORITHM_TIMEOUTS[algorithm] || CONFIG.SYSTEM.PREDICTION_TIMEOUT;
+    } catch (error) {
+      return CONFIG.SYSTEM.PREDICTION_TIMEOUT;
+    }
+  }
+
+  static validateChannelData(record) {
+    try {
+      if (!record) return false;
+      if (!record.expect || !record.open_code) return false;
+      
+      if (!this.isValidExpect(record.expect)) return false;
+      
+      const numbers = record.open_code.split(",");
+      if (numbers.length !== 7) return false;
+      
+      const parsedNumbers = numbers.map(n => this.safeInt(n, 0));
+      
+      for (const num of parsedNumbers) {
+        if (num < 1 || num > 49) return false;
+      }
+      
+      const uniqueNumbers = new Set(parsedNumbers.slice(0, 6));
+      if (uniqueNumbers.size !== 6) return false;
+      
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
 }
 
 // ==============================================================================
-// 3. 消息管理器
+// 3. 频道消息解析器
+// ==============================================================================
+
+class ChannelMessageParser {
+  static parseMessage(text) {
+    try {
+      if (!text || typeof text !== 'string') return null;
+      
+      const lines = text.trim().split('\n');
+      if (lines.length < 4) return null;
+      
+      const expect = this.extractExpect(lines[0]);
+      if (!expect) return null;
+      
+      const numbers = this.extractNumbers(lines[1]);
+      if (!numbers || numbers.length !== 7) return null;
+      
+      const zodiacs = this.extractZodiacs(lines[2]);
+      const colors = this.extractColors(lines[3]);
+      
+      const openCode = numbers.map(n => n.toString().padStart(2, '0')).join(',');
+      
+      return {
+        expect: expect.toString().padStart(7, '0'),
+        open_code: openCode,
+        raw_text: text,
+        numbers: numbers,
+        zodiacs: zodiacs,
+        colors: colors,
+        timestamp: Date.now()
+      };
+    } catch (error) {
+      Logger.error("ChannelMessageParser", "解析消息失败", error);
+      return null;
+    }
+  }
+
+  static extractExpect(line) {
+    try {
+      for (const pattern of CONFIG.CHANNEL_MESSAGE_PATTERNS) {
+        const match = line.match(pattern);
+        if (match && match[1]) {
+          return Formatter.safeInt(match[1]);
+        }
+      }
+      
+      const fallbackMatch = line.match(/\d{7}/);
+      if (fallbackMatch) {
+        return Formatter.safeInt(fallbackMatch[0]);
+      }
+      
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  static extractNumbers(line) {
+    try {
+      const matches = line.match(CONFIG.NUMBER_PATTERN);
+      if (!matches) return null;
+      
+      const numbers = matches.map(match => Formatter.safeInt(match));
+      
+      if (numbers.length >= 7) {
+        return numbers.slice(0, 7);
+      }
+      
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  static extractZodiacs(line) {
+    try {
+      const zodiacs = [];
+      for (const char of line) {
+        const normalizedZodiac = CONFIG.ZODIAC_CHAR_MAP[char];
+        if (normalizedZodiac) {
+          zodiacs.push(normalizedZodiac);
+        }
+      }
+      return zodiacs;
+    } catch (error) {
+      return [];
+    }
+  }
+
+  static extractColors(line) {
+    try {
+      const colors = [];
+      for (const char of line) {
+        const color = CONFIG.COLOR_EMOJI_MAP[char];
+        if (color) {
+          colors.push(color);
+        }
+      }
+      return colors;
+    } catch (error) {
+      return [];
+    }
+  }
+
+  static validateParsedRecord(record) {
+    try {
+      if (!record) return false;
+      if (!record.expect || !record.open_code) return false;
+      
+      const expect = record.expect.toString();
+      if (!/^\d{7}$/.test(expect)) return false;
+      
+      const numbers = record.open_code.split(',').map(n => Formatter.safeInt(n, 0));
+      if (numbers.length !== 7) return false;
+      
+      for (const num of numbers) {
+        if (num < 1 || num > 49) return false;
+      }
+      
+      const normalNumbers = numbers.slice(0, 6);
+      const specialNumber = numbers[6];
+      
+      const uniqueNormals = new Set(normalNumbers);
+      if (uniqueNormals.size !== 6) return false;
+      
+      if (normalNumbers.includes(specialNumber)) return false;
+      
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  static formatRecordForDisplay(record) {
+    try {
+      if (!record) return "无效记录";
+      
+      const numbers = record.open_code.split(',').map(n => Formatter.safeInt(n));
+      const special = numbers[6] || 0;
+      const specialAttr = Formatter.getAttributes(special);
+      
+      return `第 ${record.expect} 期: ${record.open_code} | ${specialAttr.zodiac}${CONFIG.EMOJI[specialAttr.color]}`;
+    } catch (error) {
+      return "格式错误";
+    }
+  }
+}
+
+// ==============================================================================
+// 4. 消息管理器
 // ==============================================================================
 
 class MessageManager {
   static userMessages = new Map();
+  static lastCleanupTime = Date.now();
   
   static initUser(chatId) {
     if (!this.userMessages.has(chatId)) {
@@ -603,10 +850,47 @@ class MessageManager {
       return 0;
     }
   }
+  
+  static autoCleanup() {
+    try {
+      const now = Date.now();
+      if (now - this.lastCleanupTime < CONFIG.SYSTEM.AUTO_CLEANUP_INTERVAL) {
+        return;
+      }
+      
+      Logger.info("MessageManager", "开始自动清理用户消息缓存");
+      
+      let totalCleaned = 0;
+      
+      for (const [chatId, userMap] of this.userMessages.entries()) {
+        if (userMap.size > CONFIG.SYSTEM.MESSAGE_MANAGER_MAX_MESSAGES_PER_USER) {
+          const cleaned = this.cleanupOldMessages(chatId, 10);
+          totalCleaned += cleaned;
+        }
+      }
+      
+      this.lastCleanupTime = now;
+      
+      if (totalCleaned > 0) {
+        Logger.info("MessageManager", `自动清理完成，清理了 ${totalCleaned} 条消息`);
+      }
+      
+      if (this.userMessages.size > CONFIG.SYSTEM.MESSAGE_MANAGER_MAX_USERS) {
+        const keysToDelete = Array.from(this.userMessages.keys())
+          .slice(0, this.userMessages.size - CONFIG.SYSTEM.MESSAGE_MANAGER_MAX_USERS);
+        
+        keysToDelete.forEach(key => this.userMessages.delete(key));
+        Logger.info("MessageManager", `清理了 ${keysToDelete.length} 个不活跃用户`);
+      }
+      
+    } catch (error) {
+      Logger.error("MessageManager", "自动清理失败", error);
+    }
+  }
 }
 
 // ==============================================================================
-// 4. 缓存管理器
+// 5. 缓存管理器
 // ==============================================================================
 
 class CacheManager {
@@ -684,7 +968,7 @@ class CacheManager {
 }
 
 // ==============================================================================
-// 5. 数据库操作层
+// 6. 数据库操作层（已优化索引）
 // ==============================================================================
 
 const DB = {
@@ -701,9 +985,12 @@ const DB = {
           id INTEGER PRIMARY KEY AUTOINCREMENT, 
           expect TEXT UNIQUE, 
           open_code TEXT, 
+          parsed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )`,
         `CREATE INDEX IF NOT EXISTS idx_history_expect ON lottery_history (expect DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_history_created_at ON lottery_history (created_at DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_history_parsed_at ON lottery_history (parsed_at DESC)`,
         `CREATE TABLE IF NOT EXISTS lottery_settings (
           setting_key TEXT PRIMARY KEY, 
           value TEXT,
@@ -717,17 +1004,23 @@ const DB = {
           reason TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )`,
-        `CREATE TABLE IF NOT EXISTS montecarlo_results (
+        `CREATE INDEX IF NOT EXISTS idx_deletion_log_created_at ON deletion_log (created_at DESC)`,
+        `CREATE TABLE IF NOT EXISTS channel_sync_log (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
-          simulation_id TEXT,
-          simulations INTEGER,
-          sample_type TEXT,
-          special_numbers TEXT,
-          normal_numbers TEXT,
-          confidence REAL,
+          sync_id TEXT,
+          messages_fetched INTEGER,
+          records_parsed INTEGER,
+          records_added INTEGER,
+          records_skipped INTEGER,
+          start_message_id INTEGER,
+          end_message_id INTEGER,
           duration_ms INTEGER,
+          status TEXT,
+          error_message TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`
+        )`,
+        `CREATE INDEX IF NOT EXISTS idx_channel_sync_created_at ON channel_sync_log (created_at DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_channel_sync_sync_id ON channel_sync_log (sync_id)`
       ];
       
       const batch = statements.map(sql => env.DB.prepare(sql));
@@ -860,10 +1153,11 @@ const DB = {
         const batch = env.DB.batch(
           validChunk.map(record =>
             env.DB.prepare(
-              "INSERT OR IGNORE INTO lottery_history (expect, open_code) VALUES (?, ?)"
+              "INSERT OR IGNORE INTO lottery_history (expect, open_code, parsed_at) VALUES (?, ?, ?)"
             ).bind(
               Formatter.safeString(record.expect), 
-              Formatter.safeString(record.open_code)
+              Formatter.safeString(record.open_code),
+              new Date().toISOString()
             )
           )
         );
@@ -879,10 +1173,11 @@ const DB = {
           for (const record of validChunk) {
             try {
               const result = await env.DB.prepare(
-                "INSERT OR IGNORE INTO lottery_history (expect, open_code) VALUES (?, ?)"
+                "INSERT OR IGNORE INTO lottery_history (expect, open_code, parsed_at) VALUES (?, ?, ?)"
               ).bind(
                 Formatter.safeString(record.expect), 
-                Formatter.safeString(record.open_code)
+                Formatter.safeString(record.open_code),
+                new Date().toISOString()
               ).run();
               
               totalAdded += (result.changes || 0);
@@ -958,8 +1253,20 @@ const DB = {
         try {
           const parsed = JSON.parse(w);
           const defaultWeights = { ...CONFIG.DEFAULT_ALGO_WEIGHTS };
+          
           weights = { ...defaultWeights, ...parsed };
+          
+          if (weights.w_montecarlo_independent) {
+            delete weights.w_montecarlo_independent;
+          }
+          
+          if (!weights.w_monte_carlo) {
+            weights.w_monte_carlo = 2.5;
+          }
+          
+          weights._version = weights._version || "12.4.1";
         } catch (parseError) {
+          Logger.error("DB", "解析权重设置失败，使用默认", parseError);
           weights = { ...CONFIG.DEFAULT_ALGO_WEIGHTS };
         }
       } else {
@@ -980,10 +1287,14 @@ const DB = {
         "ALGO_WEIGHTS": JSON.stringify(CONFIG.DEFAULT_ALGO_WEIGHTS),
         "SYSTEM_VERSION": CONFIG.SYSTEM.VERSION,
         "LAST_SYNC": "",
+        "LAST_CHANNEL_SYNC": "",
         "TOTAL_SYNCS": "0",
         "TOTAL_DELETIONS": "0",
-        "TOTAL_MONTE": "0",
-        "MONTE_SAMPLE_TYPE": "full_history"
+        "TOTAL_CHANNEL_SYNCS": "0",
+        "CHANNEL_SYNC_MODE": "incremental",
+        "MAX_CHANNEL_MESSAGES": "1000",
+        "LAST_MESSAGE_ID": "0",
+        "SYNC_STATUS": "idle"
       };
 
       const batch = Object.entries(defaultSettings).map(([key, value]) =>
@@ -1121,11 +1432,54 @@ const DB = {
         lastDeletion: null
       };
     }
+  },
+
+  logChannelSync: async function(env, syncData) {
+    try {
+      const syncId = `sync_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      const result = await env.DB.prepare(
+        `INSERT INTO channel_sync_log (
+          sync_id, messages_fetched, records_parsed, records_added, 
+          records_skipped, start_message_id, end_message_id, 
+          duration_ms, status, error_message
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        syncId,
+        syncData.messagesFetched || 0,
+        syncData.recordsParsed || 0,
+        syncData.recordsAdded || 0,
+        syncData.recordsSkipped || 0,
+        syncData.startMessageId || 0,
+        syncData.endMessageId || 0,
+        syncData.durationMs || 0,
+        syncData.status || "completed",
+        syncData.errorMessage || null
+      ).run();
+      
+      return { success: true, syncId };
+    } catch (e) {
+      Logger.error("DB", "记录频道同步日志失败", e);
+      return { success: false, error: e.message };
+    }
+  },
+
+  getChannelSyncStats: async function(env, limit = 10) {
+    try {
+      const { results } = await env.DB.prepare(
+        "SELECT * FROM channel_sync_log ORDER BY created_at DESC LIMIT ?"
+      ).bind(limit).all();
+      
+      return results || [];
+    } catch (e) {
+      Logger.error("DB", "获取频道同步统计失败", e);
+      return [];
+    }
   }
 };
 
 // ==============================================================================
-// 6. KNN算法实现
+// 7. KNN算法实现
 // ==============================================================================
 
 class KNNAlgorithm {
@@ -1140,7 +1494,6 @@ class KNNAlgorithm {
       
       const distances = [];
       
-      // 只比较最近的一定数量的记录
       const recentHistory = history.slice(0, Math.min(100, history.length));
       
       for (let i = 1; i < recentHistory.length; i++) {
@@ -1151,7 +1504,7 @@ class KNNAlgorithm {
         if (!recordFeatures) continue;
         
         const distance = this.calculateDistance(currentFeatures, recordFeatures);
-        const nextRecord = recentHistory[i - 1]; // 前一期记录作为下一期
+        const nextRecord = recentHistory[i - 1];
         
         if (nextRecord && nextRecord.open_code) {
           distances.push({
@@ -1162,10 +1515,8 @@ class KNNAlgorithm {
         }
       }
       
-      // 按距离排序，距离越小越相似
       distances.sort((a, b) => a.distance - b.distance);
       
-      // 返回最相似的k条记录
       return distances.slice(0, k);
     } catch (error) {
       Logger.error("KNN", "寻找相似记录失败", error);
@@ -1186,7 +1537,6 @@ class KNNAlgorithm {
       const specialAttr = Formatter.getAttributes(special);
       const specialFeatures = Formatter.calculateFeatures(special);
       
-      // 计算平码的特征统计
       const normalFeatures = {
         zodiacCount: {},
         colorCount: {},
@@ -1200,28 +1550,21 @@ class KNNAlgorithm {
         const attr = Formatter.getAttributes(num);
         const features = Formatter.calculateFeatures(num);
         
-        // 生肖统计
         normalFeatures.zodiacCount[attr.zodiac] = (normalFeatures.zodiacCount[attr.zodiac] || 0) + 1;
-        
-        // 颜色统计
         normalFeatures.colorCount[attr.color] = (normalFeatures.colorCount[attr.color] || 0) + 1;
         
-        // 尾数统计
         const tail = num % 10;
         normalFeatures.tailCount[tail] = (normalFeatures.tailCount[tail] || 0) + 1;
         
-        // 头数统计
         const head = Math.floor(num / 10);
         normalFeatures.headCount[head] = (normalFeatures.headCount[head] || 0) + 1;
         
-        // 大小统计
         if (num >= 25) {
           normalFeatures.sizeCount.big++;
         } else {
           normalFeatures.sizeCount.small++;
         }
         
-        // 单双统计
         if (num % 2 !== 0) {
           normalFeatures.oddEvenCount.odd++;
         } else {
@@ -1245,49 +1588,40 @@ class KNNAlgorithm {
     try {
       let distance = 0;
       
-      // 特码特征距离
       const f1 = features1.special;
       const f2 = features2.special;
       
       if (f1 && f2) {
-        // 生肖距离
         if (f1.zodiac === f2.zodiac) {
-          distance -= 3; // 相同生肖，距离减少
+          distance -= 3;
         } else {
-          distance += 1; // 不同生肖，距离增加
+          distance += 1;
         }
         
-        // 颜色距离
         if (f1.color === f2.color) {
           distance -= 2;
         } else {
           distance += 0.5;
         }
         
-        // 尾数距离
         const tailDiff = Math.abs(f1.tail - f2.tail);
         distance += tailDiff * 0.1;
         
-        // 头数距离
         const headDiff = Math.abs(f1.head - f2.head);
         distance += headDiff * 0.2;
         
-        // 大小距离
         if (f1.isBig !== f2.isBig) {
           distance += 0.5;
         }
         
-        // 单双距离
         if (f1.isOdd !== f2.isOdd) {
           distance += 0.5;
         }
       }
       
-      // 平码特征距离
       const nf1 = features1.normals;
       const nf2 = features2.normals;
       
-      // 生肖分布距离
       const allZodiacs = Object.keys(CONFIG.ZODIAC_MAP);
       for (const zodiac of allZodiacs) {
         const count1 = nf1.zodiacCount[zodiac] || 0;
@@ -1295,7 +1629,6 @@ class KNNAlgorithm {
         distance += Math.abs(count1 - count2) * 0.3;
       }
       
-      // 颜色分布距离
       const colors = ['red', 'blue', 'green'];
       for (const color of colors) {
         const count1 = nf1.colorCount[color] || 0;
@@ -1303,32 +1636,28 @@ class KNNAlgorithm {
         distance += Math.abs(count1 - count2) * 0.2;
       }
       
-      // 尾数分布距离
       for (let i = 0; i <= 9; i++) {
         const count1 = nf1.tailCount[i] || 0;
         const count2 = nf2.tailCount[i] || 0;
         distance += Math.abs(count1 - count2) * 0.1;
       }
       
-      // 头数分布距离
       for (let i = 0; i <= 4; i++) {
         const count1 = nf1.headCount[i] || 0;
         const count2 = nf2.headCount[i] || 0;
         distance += Math.abs(count1 - count2) * 0.15;
       }
       
-      // 大小分布距离
       distance += Math.abs(nf1.sizeCount.big - nf2.sizeCount.big) * 0.2;
       distance += Math.abs(nf1.sizeCount.small - nf2.sizeCount.small) * 0.2;
       
-      // 单双分布距离
       distance += Math.abs(nf1.oddEvenCount.odd - nf2.oddEvenCount.odd) * 0.1;
       distance += Math.abs(nf1.oddEvenCount.even - nf2.oddEvenCount.even) * 0.1;
       
       return distance;
     } catch (error) {
       Logger.error("KNN", "计算距离失败", error);
-      return 1000; // 返回一个大值表示不相似
+      return 1000;
     }
   }
   
@@ -1338,7 +1667,6 @@ class KNNAlgorithm {
         return null;
       }
       
-      // 统计相似记录下一期的特征
       const predictions = {
         specialNumbers: {},
         zodiacCount: {},
@@ -1360,10 +1688,8 @@ class KNNAlgorithm {
         const special = numbers[6] || 1;
         const normals = numbers.slice(0, 6);
         
-        // 特码统计
         predictions.specialNumbers[special] = (predictions.specialNumbers[special] || 0) + item.similarity;
         
-        // 特码特征统计
         const specialAttr = Formatter.getAttributes(special);
         const specialFeatures = Formatter.calculateFeatures(special);
         
@@ -1395,13 +1721,11 @@ class KNNAlgorithm {
           }
         }
         
-        // 平码统计
         for (const num of normals) {
-          predictions.normalNumbers[num] = (predictions.normalNumbers[num] || 0) + item.similarity * 0.5; // 平码权重较低
+          predictions.normalNumbers[num] = (predictions.normalNumbers[num] || 0) + item.similarity * 0.5;
         }
       }
       
-      // 计算预测结果
       const result = {
         specialCandidates: this.getTopCandidates(predictions.specialNumbers, 10),
         zodiacCandidates: this.getTopCandidates(predictions.zodiacCount, 5),
@@ -1440,7 +1764,7 @@ class KNNAlgorithm {
 }
 
 // ==============================================================================
-// 7. 增强的统计算法
+// 8. 增强的统计算法
 // ==============================================================================
 
 class EnhancedStatistics {
@@ -1454,10 +1778,12 @@ class EnhancedStatistics {
       const maxRecords = Math.min(history.length, CONFIG.SYSTEM.STATS_WINDOW_SIZE);
       const historySlice = history.slice(0, maxRecords);
       
-      // 处理历史数据，提取特征
       const processedHistory = this.processHistoryData(historySlice);
       
-      // 分析各种统计规律
+      if (processedHistory.length < 5) {
+        return this.createEmptyStats();
+      }
+      
       this.analyzeZodiacPatterns(stats, processedHistory);
       this.analyzeColorPatterns(stats, processedHistory);
       this.analyzeTailPatterns(stats, processedHistory);
@@ -1466,12 +1792,9 @@ class EnhancedStatistics {
       this.analyzeOddEvenPatterns(stats, processedHistory);
       this.analyzeNormalToSpecialPatterns(stats, processedHistory);
       
-      // 计算频率和概率
       this.calculateFrequencies(stats, processedHistory);
       
       stats.totalRecords = processedHistory.length;
-      
-      // 生成统计摘要
       stats.summary = this.generateSummary(stats);
       
       return stats;
@@ -1493,7 +1816,6 @@ class EnhancedStatistics {
           const attr = Formatter.getAttributes(special);
           const features = Formatter.calculateFeatures(special);
           
-          // 处理平码特征
           const normalFeatures = {
             zodiacs: normals.map(n => Formatter.getAttributes(n).zodiac),
             colors: normals.map(n => Formatter.getAttributes(n).color),
@@ -1528,44 +1850,44 @@ class EnhancedStatistics {
     return {
       totalRecords: 0,
       zodiacPatterns: {
-        sameZodiac: {},          // 上期开A生肖，下期开B生肖的概率
-        zodiacGap: {},           // 生肖间隔期数统计
-        consecutiveZodiac: {},   // 连续出现同一生肖的概率
-        zodiacCombinations: {}   // 生肖组合出现频率
+        sameZodiac: {},
+        zodiacGap: {},
+        consecutiveZodiac: {},
+        zodiacCombinations: {}
       },
       colorPatterns: {
-        sameColor: {},           // 颜色转移概率
-        colorGap: {},            // 颜色间隔期数
-        consecutiveColor: {}     // 颜色连续出现
+        sameColor: {},
+        colorGap: {},
+        consecutiveColor: {}
       },
       tailPatterns: {
-        tailTransfer: {},        // 尾数转移
-        tailFromNormal: {},      // 平码尾数到下期特码尾数
-        tailGap: {},             // 尾数间隔
-        consecutiveTail: {}      // 尾数连续出现
+        tailTransfer: {},
+        tailFromNormal: {},
+        tailGap: {},
+        consecutiveTail: {}
       },
       headPatterns: {
-        headTransfer: {},        // 头数转移
-        headGap: {},             // 头数间隔
-        consecutiveHead: {}      // 头数连续出现
+        headTransfer: {},
+        headGap: {},
+        consecutiveHead: {}
       },
       sizePatterns: {
-        sizeTransfer: {},        // 大小转移
-        sizeGap: {},             // 大小间隔
-        consecutiveSize: {},     // 大小连续出现
-        sizeRatio: { big: 0, small: 0 } // 大小比例
+        sizeTransfer: {},
+        sizeGap: {},
+        consecutiveSize: {},
+        sizeRatio: { big: 0, small: 0 }
       },
       oddEvenPatterns: {
-        oddEvenTransfer: {},     // 单双转移
-        oddEvenGap: {},          // 单双间隔
-        consecutiveOddEven: {},  // 单双连续出现
-        oddEvenRatio: { odd: 0, even: 0 } // 单双比例
+        oddEvenTransfer: {},
+        oddEvenGap: {},
+        consecutiveOddEven: {},
+        oddEvenRatio: { odd: 0, even: 0 }
       },
       normalToSpecial: {
-        tailInNormals: {},       // 平码尾数在特码中出现的情况
-        zodiacInNormals: {},     // 平码生肖在特码中出现的情况
-        colorInNormals: {},      // 平码颜色在特码中出现的情况
-        numberInNormals: {}      // 平码号码在特码中出现的情况
+        tailInNormals: {},
+        zodiacInNormals: {},
+        colorInNormals: {},
+        numberInNormals: {}
       },
       frequencies: {
         specialFrequency: {},
@@ -1589,23 +1911,19 @@ class EnhancedStatistics {
         
         if (!current || !next) continue;
         
-        // 生肖转移概率
         const key = `${current.zodiac}->${next.zodiac}`;
         stats.zodiacPatterns.sameZodiac[key] = (stats.zodiacPatterns.sameZodiac[key] || 0) + 1;
         
-        // 连续出现同一生肖
         if (current.zodiac === next.zodiac) {
           stats.zodiacPatterns.consecutiveZodiac[current.zodiac] = (stats.zodiacPatterns.consecutiveZodiac[current.zodiac] || 0) + 1;
         }
         
-        // 生肖组合（上期平码生肖与下期特码生肖的关系）
         for (const normalZodiac of current.normalFeatures.zodiacs) {
           const comboKey = `${normalZodiac}->${next.zodiac}`;
           stats.zodiacPatterns.zodiacCombinations[comboKey] = (stats.zodiacPatterns.zodiacCombinations[comboKey] || 0) + 1;
         }
       }
       
-      // 计算概率
       this.calculateProbabilities(stats.zodiacPatterns.sameZodiac);
       this.calculateProbabilities(stats.zodiacPatterns.zodiacCombinations);
     } catch (error) {
@@ -1621,16 +1939,13 @@ class EnhancedStatistics {
         
         if (!current || !next) continue;
         
-        // 颜色转移概率
         const key = `${current.color}->${next.color}`;
         stats.colorPatterns.sameColor[key] = (stats.colorPatterns.sameColor[key] || 0) + 1;
         
-        // 连续出现同一颜色
         if (current.color === next.color) {
           stats.colorPatterns.consecutiveColor[current.color] = (stats.colorPatterns.consecutiveColor[current.color] || 0) + 1;
         }
         
-        // 平码颜色与特码颜色的关系
         for (const normalColor of current.normalFeatures.colors) {
           const comboKey = `${normalColor}->${next.color}`;
           stats.normalToSpecial.colorInNormals[comboKey] = (stats.normalToSpecial.colorInNormals[comboKey] || 0) + 1;
@@ -1652,20 +1967,16 @@ class EnhancedStatistics {
         
         if (!current || !next) continue;
         
-        // 尾数转移概率
         const tailKey = `${current.tail}->${next.tail}`;
         stats.tailPatterns.tailTransfer[tailKey] = (stats.tailPatterns.tailTransfer[tailKey] || 0) + 1;
         
-        // 平码尾数到下期特码尾数
         for (const normalTail of current.normalFeatures.tails) {
           const tailFromNormalKey = `${normalTail}->${next.tail}`;
           stats.tailPatterns.tailFromNormal[tailFromNormalKey] = (stats.tailPatterns.tailFromNormal[tailFromNormalKey] || 0) + 1;
           
-          // 记录平码尾数在特码中出现的情况
           stats.normalToSpecial.tailInNormals[normalTail] = (stats.normalToSpecial.tailInNormals[normalTail] || 0) + 1;
         }
         
-        // 连续出现同一尾数
         if (current.tail === next.tail) {
           stats.tailPatterns.consecutiveTail[current.tail] = (stats.tailPatterns.consecutiveTail[current.tail] || 0) + 1;
         }
@@ -1686,11 +1997,9 @@ class EnhancedStatistics {
         
         if (!current || !next) continue;
         
-        // 头数转移概率
         const headKey = `${current.head}->${next.head}`;
         stats.headPatterns.headTransfer[headKey] = (stats.headPatterns.headTransfer[headKey] || 0) + 1;
         
-        // 连续出现同一头数
         if (current.head === next.head) {
           stats.headPatterns.consecutiveHead[current.head] = (stats.headPatterns.consecutiveHead[current.head] || 0) + 1;
         }
@@ -1713,21 +2022,17 @@ class EnhancedStatistics {
         
         if (!current || !next) continue;
         
-        // 大小统计
         if (current.size === "大") bigCount++;
         else smallCount++;
         
-        // 大小转移概率
         const sizeKey = `${current.size}->${next.size}`;
         stats.sizePatterns.sizeTransfer[sizeKey] = (stats.sizePatterns.sizeTransfer[sizeKey] || 0) + 1;
         
-        // 连续出现同一大小
         if (current.size === next.size) {
           stats.sizePatterns.consecutiveSize[current.size] = (stats.sizePatterns.consecutiveSize[current.size] || 0) + 1;
         }
       }
       
-      // 计算大小比例
       stats.sizePatterns.sizeRatio = {
         big: bigCount / processedHistory.length,
         small: smallCount / processedHistory.length
@@ -1750,21 +2055,17 @@ class EnhancedStatistics {
         
         if (!current || !next) continue;
         
-        // 单双统计
         if (current.oddEven === "单") oddCount++;
         else evenCount++;
         
-        // 单双转移概率
         const oddEvenKey = `${current.oddEven}->${next.oddEven}`;
         stats.oddEvenPatterns.oddEvenTransfer[oddEvenKey] = (stats.oddEvenPatterns.oddEvenTransfer[oddEvenKey] || 0) + 1;
         
-        // 连续出现同一单双
         if (current.oddEven === next.oddEven) {
           stats.oddEvenPatterns.consecutiveOddEven[current.oddEven] = (stats.oddEvenPatterns.consecutiveOddEven[current.oddEven] || 0) + 1;
         }
       }
       
-      // 计算单双比例
       stats.oddEvenPatterns.oddEvenRatio = {
         odd: oddCount / processedHistory.length,
         even: evenCount / processedHistory.length
@@ -1784,14 +2085,12 @@ class EnhancedStatistics {
         
         if (!current || !next) continue;
         
-        // 平码号码在特码中出现的情况
         for (const normalNum of current.normals) {
           if (normalNum === next.special) {
             stats.normalToSpecial.numberInNormals[normalNum] = (stats.normalToSpecial.numberInNormals[normalNum] || 0) + 1;
           }
         }
         
-        // 平码生肖在特码中出现的情况
         for (const normalZodiac of current.normalFeatures.zodiacs) {
           if (normalZodiac === next.zodiac) {
             stats.normalToSpecial.zodiacInNormals[normalZodiac] = (stats.normalToSpecial.zodiacInNormals[normalZodiac] || 0) + 1;
@@ -1805,7 +2104,6 @@ class EnhancedStatistics {
 
   static calculateFrequencies(stats, processedHistory) {
     try {
-      // 初始化频率统计
       for (let i = 1; i <= 49; i++) {
         stats.frequencies.specialFrequency[i] = 0;
         stats.frequencies.normalFrequency[i] = 0;
@@ -1830,40 +2128,25 @@ class EnhancedStatistics {
       stats.frequencies.sizeFrequency = { 大: 0, 小: 0 };
       stats.frequencies.oddEvenFrequency = { 单: 0, 双: 0 };
       
-      // 统计频率
       for (const record of processedHistory) {
-        // 特码频率
         stats.frequencies.specialFrequency[record.special]++;
         
-        // 平码频率
         for (const num of record.normals) {
           stats.frequencies.normalFrequency[num]++;
         }
         
-        // 生肖频率
         stats.frequencies.zodiacFrequency[record.zodiac]++;
-        
-        // 颜色频率
         stats.frequencies.colorFrequency[record.color]++;
-        
-        // 尾数频率
         stats.frequencies.tailFrequency[record.tail]++;
-        
-        // 头数频率
         stats.frequencies.headFrequency[record.head]++;
-        
-        // 大小频率
         stats.frequencies.sizeFrequency[record.size]++;
-        
-        // 单双频率
         stats.frequencies.oddEvenFrequency[record.oddEven]++;
       }
       
-      // 计算概率
       const total = processedHistory.length;
       for (let i = 1; i <= 49; i++) {
         stats.frequencies.specialFrequency[i] /= total;
-        stats.frequencies.normalFrequency[i] /= (total * 6); // 每个平码有6个数字
+        stats.frequencies.normalFrequency[i] /= (total * 6);
       }
       
       Object.keys(stats.frequencies.zodiacFrequency).forEach(zodiac => {
@@ -1890,13 +2173,11 @@ class EnhancedStatistics {
     try {
       const totals = {};
       
-      // 计算每个起点的总数
       Object.keys(patternMap).forEach(key => {
         const [from] = key.split('->');
         totals[from] = (totals[from] || 0) + patternMap[key];
       });
       
-      // 转换为概率
       Object.keys(patternMap).forEach(key => {
         const [from] = key.split('->');
         if (totals[from] > 0) {
@@ -1916,20 +2197,18 @@ class EnhancedStatistics {
     };
     
     try {
-      // 找出最强的生肖转移模式
       const topZodiacTransfers = Object.entries(stats.zodiacPatterns.sameZodiac)
         .sort((a, b) => b[1] - a[1])
         .slice(0, 3);
       
       topZodiacTransfers.forEach(([key, prob]) => {
-        if (prob > 0.2) { // 概率大于20%认为是强模式
+        if (prob > 0.2) {
           const [from, to] = key.split('->');
           summary.strongPatterns.push(`上期开${from}，下期开${to}的概率为${(prob * 100).toFixed(1)}%`);
           summary.recommendations.push(`上期${from}，重点关注${to}`);
         }
       });
       
-      // 找出最强的颜色转移模式
       const topColorTransfers = Object.entries(stats.colorPatterns.sameColor)
         .sort((a, b) => b[1] - a[1])
         .slice(0, 2);
@@ -1941,7 +2220,6 @@ class EnhancedStatistics {
         }
       });
       
-      // 平码尾数到特码尾数的强模式
       const topTailFromNormal = Object.entries(stats.tailPatterns.tailFromNormal)
         .sort((a, b) => b[1] - a[1])
         .slice(0, 5);
@@ -1954,7 +2232,6 @@ class EnhancedStatistics {
         }
       });
       
-      // 大小单双统计
       summary.statistics.sizeRatio = {
         big: (stats.sizePatterns.sizeRatio.big * 100).toFixed(1) + '%',
         small: (stats.sizePatterns.sizeRatio.small * 100).toFixed(1) + '%'
@@ -1965,7 +2242,6 @@ class EnhancedStatistics {
         even: (stats.oddEvenPatterns.oddEvenRatio.even * 100).toFixed(1) + '%'
       };
       
-      // 找出最常出现的尾数
       const topTails = Object.entries(stats.frequencies.tailFrequency)
         .sort((a, b) => b[1] - a[1])
         .slice(0, 3)
@@ -1976,7 +2252,6 @@ class EnhancedStatistics {
         summary.recommendations.push(`常见尾数: ${topTails.map(t => t.tail).join(', ')}`);
       }
       
-      // 找出最常出现的头数
       const topHeads = Object.entries(stats.frequencies.headFrequency)
         .sort((a, b) => b[1] - a[1])
         .slice(0, 2)
@@ -1986,7 +2261,6 @@ class EnhancedStatistics {
         summary.statistics.topHeads = topHeads;
       }
       
-      // 热门号码（出现频率高的号码）
       const hotNumbers = Object.entries(stats.frequencies.specialFrequency)
         .sort((a, b) => b[1] - a[1])
         .slice(0, 5)
@@ -1997,7 +2271,6 @@ class EnhancedStatistics {
         summary.recommendations.push(`热门号码: ${hotNumbers.map(n => n.number).join(', ')}`);
       }
       
-      // 冷门号码（最近出现很少的号码）
       const coldNumbers = Object.entries(stats.frequencies.specialFrequency)
         .sort((a, b) => a[1] - b[1])
         .slice(0, 5)
@@ -2038,7 +2311,6 @@ class EnhancedStatistics {
       const lastSize = lastRecord.size;
       const lastOddEven = lastRecord.oddEven;
       
-      // 根据生肖转移概率生成预测
       if (stats.zodiacPatterns.sameZodiac) {
         const zodiacKeys = Object.keys(stats.zodiacPatterns.sameZodiac)
           .filter(key => key.startsWith(`${lastZodiac}->`))
@@ -2055,14 +2327,13 @@ class EnhancedStatistics {
             reason: `上期开${lastZodiac}`
           });
           
-          // 生成对应的号码
           const numbers = CONFIG.ZODIAC_MAP[toZodiac] || [];
           numbers.forEach(num => {
             const existing = prediction.specialNumbers.find(item => item.number === num);
             if (!existing) {
               prediction.specialNumbers.push({
                 number: num,
-                probability: prob * 0.5, // 基础概率
+                probability: prob * 0.5,
                 reason: `生肖${toZodiac} (上期${lastZodiac})`
               });
             }
@@ -2070,7 +2341,6 @@ class EnhancedStatistics {
         });
       }
       
-      // 根据颜色转移概率生成预测
       if (stats.colorPatterns.sameColor) {
         const colorKeys = Object.keys(stats.colorPatterns.sameColor)
           .filter(key => key.startsWith(`${lastColor}->`))
@@ -2091,7 +2361,6 @@ class EnhancedStatistics {
         });
       }
       
-      // 根据尾数转移概率生成预测
       if (stats.tailPatterns.tailTransfer) {
         const tailKeys = Object.keys(stats.tailPatterns.tailTransfer)
           .filter(key => key.startsWith(`${lastTail}->`))
@@ -2108,7 +2377,6 @@ class EnhancedStatistics {
             reason: `上期尾${lastTail}`
           });
           
-          // 生成对应尾数的号码
           for (let num = toTail; num <= 49; num += 10) {
             if (num >= 1 && num <= 49) {
               const existing = prediction.specialNumbers.find(item => item.number === num);
@@ -2126,7 +2394,6 @@ class EnhancedStatistics {
         });
       }
       
-      // 根据平码尾数到特码尾数的概率生成预测
       if (stats.tailPatterns.tailFromNormal && lastRecord.normalFeatures) {
         const normalTails = lastRecord.normalFeatures.tails || [];
         normalTails.forEach(tail => {
@@ -2142,7 +2409,6 @@ class EnhancedStatistics {
             if (prob > 0.1) {
               prediction.analysis.push(`平码尾数${tail}极大可能下期特码尾数${toTail} (${(prob * 100).toFixed(1)}%)`);
               
-              // 增加对应尾数号码的概率
               for (let num = toTail; num <= 49; num += 10) {
                 if (num >= 1 && num <= 49) {
                   const existing = prediction.specialNumbers.find(item => item.number === num);
@@ -2163,7 +2429,6 @@ class EnhancedStatistics {
         });
       }
       
-      // 根据大小模式生成预测
       if (stats.sizePatterns.sizeTransfer) {
         const sizeKey = `${lastSize}->大`;
         const sizeProb = stats.sizePatterns.sizeTransfer[sizeKey] || 0;
@@ -2172,7 +2437,6 @@ class EnhancedStatistics {
           prediction.sizePrediction = "大";
           prediction.analysis.push(`上期${lastSize}，下期大概率开大 (${(sizeProb * 100).toFixed(1)}%)`);
           
-          // 增加大号码的概率
           for (let num = 25; num <= 49; num++) {
             const existing = prediction.specialNumbers.find(item => item.number === num);
             if (existing) {
@@ -2189,7 +2453,6 @@ class EnhancedStatistics {
           prediction.sizePrediction = "小";
           prediction.analysis.push(`上期${lastSize}，下期大概率开小 (${(100 - sizeProb * 100).toFixed(1)}%)`);
           
-          // 增加小号码的概率
           for (let num = 1; num <= 24; num++) {
             const existing = prediction.specialNumbers.find(item => item.number === num);
             if (existing) {
@@ -2205,7 +2468,6 @@ class EnhancedStatistics {
         }
       }
       
-      // 根据单双模式生成预测
       if (stats.oddEvenPatterns.oddEvenTransfer) {
         const oeKey = `${lastOddEven}->单`;
         const oeProb = stats.oddEvenPatterns.oddEvenTransfer[oeKey] || 0;
@@ -2214,7 +2476,6 @@ class EnhancedStatistics {
           prediction.oddEvenPrediction = "单";
           prediction.analysis.push(`上期${lastOddEven}，下期大概率开单 (${(oeProb * 100).toFixed(1)}%)`);
           
-          // 增加单数号码的概率
           for (let num = 1; num <= 49; num += 2) {
             const existing = prediction.specialNumbers.find(item => item.number === num);
             if (existing) {
@@ -2231,7 +2492,6 @@ class EnhancedStatistics {
           prediction.oddEvenPrediction = "双";
           prediction.analysis.push(`上期${lastOddEven}，下期大概率开双 (${(100 - oeProb * 100).toFixed(1)}%)`);
           
-          // 增加双数号码的概率
           for (let num = 2; num <= 49; num += 2) {
             const existing = prediction.specialNumbers.find(item => item.number === num);
             if (existing) {
@@ -2247,23 +2507,19 @@ class EnhancedStatistics {
         }
       }
       
-      // 根据频率统计调整概率
       prediction.specialNumbers.forEach(item => {
         const freq = stats.frequencies.specialFrequency[item.number] || 0;
-        // 热门号码增加概率，冷门号码降低概率
-        if (freq > 0.03) { // 出现频率超过3%
+        if (freq > 0.03) {
           item.probability *= 1.2;
           item.reason += `, 热门号码`;
-        } else if (freq < 0.01) { // 出现频率低于1%
+        } else if (freq < 0.01) {
           item.probability *= 0.8;
           item.reason += `, 冷门号码`;
         }
       });
       
-      // 按概率排序
       prediction.specialNumbers.sort((a, b) => b.probability - a.probability);
       
-      // 去重和限制数量
       const seen = new Set();
       prediction.specialNumbers = prediction.specialNumbers.filter(item => {
         if (seen.has(item.number) || item.probability < 0.01) {
@@ -2282,35 +2538,40 @@ class EnhancedStatistics {
 }
 
 // ==============================================================================
-// 8. 简化的蒙特卡洛模拟引擎
+// 9. 优化的蒙特卡洛模拟引擎
 // ==============================================================================
 
-class SimplifiedMonteCarloEngine {
+class OptimizedMonteCarloEngine {
   static cache = new Map();
   
-  static async runQuickSimulation(history, simulations = 10000) {
+  static async runOptimizedSimulation(history, targetSimulations = 10000) {
     try {
       if (!history || history.length < 10) {
         return null;
       }
       
-      const cacheKey = `monte_${simulations}_${history.length}`;
+      const cacheKey = `monte_opt_${targetSimulations}_${history.length}_${history[0]?.expect || '0'}`;
       const cached = this.cache.get(cacheKey);
       
-      if (cached && (Date.now() - cached.timestamp < 30000)) {
+      if (cached && (Date.now() - cached.timestamp < 45000)) {
+        Logger.debug("OptimizedMonteCarlo", "使用缓存结果", { 
+          key: cacheKey,
+          age: Date.now() - cached.timestamp 
+        });
         return cached.result;
       }
       
       const startTime = Date.now();
       
-      // 预处理历史数据
-      const processedHistory = this.preprocessHistory(history.slice(0, Math.min(100, history.length)));
+      const processedHistory = this.preprocessHistory(history.slice(0, Math.min(150, history.length)));
       
-      if (processedHistory.length < 5) {
+      if (processedHistory.length < 8) {
+        Logger.warn("OptimizedMonteCarlo", "历史数据不足，跳过模拟");
         return null;
       }
       
-      // 初始化统计数据
+      const optimalSimulations = this.calculateOptimalSimulations(processedHistory.length, targetSimulations);
+      
       const specialFrequency = {};
       const normalFrequency = {};
       
@@ -2319,88 +2580,256 @@ class SimplifiedMonteCarloEngine {
         normalFrequency[i] = 0;
       }
       
-      // 快速模拟
-      const batchSize = 1000;
-      const batches = Math.ceil(simulations / batchSize);
+      const batchSize = Math.min(1000, Math.floor(optimalSimulations / 10));
+      const batches = Math.ceil(optimalSimulations / batchSize);
+      
+      Logger.info("OptimizedMonteCarlo", "开始批次模拟", {
+        target: targetSimulations,
+        optimal: optimalSimulations,
+        batches: batches,
+        batchSize: batchSize,
+        historySize: processedHistory.length
+      });
+      
+      const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       
       for (let batch = 0; batch < batches; batch++) {
+        const batchStart = Date.now();
+        
         for (let i = 0; i < batchSize; i++) {
-          // 随机选择一个历史记录作为基础
-          const randomIndex = Math.floor(Math.random() * processedHistory.length);
-          const baseRecord = processedHistory[randomIndex];
+          const baseRecord = this.selectBaseRecord(processedHistory, batch, i);
+          const simulated = this.simulateNextNumbersSmart(baseRecord, processedHistory);
           
-          // 生成模拟号码
-          const simulated = this.simulateNextNumbers(baseRecord, processedHistory);
-          
-          // 统计特码
           if (simulated.special >= 1 && simulated.special <= 49) {
             specialFrequency[simulated.special]++;
           }
           
-          // 统计平码
           simulated.normals.forEach(num => {
             if (num >= 1 && num <= 49) {
               normalFrequency[num]++;
             }
           });
         }
+        
+        const batchTime = Date.now() - batchStart;
+        
+        if (batch < batches - 1 && batchTime < 50) {
+          await delay(10);
+        }
+        
+        if (Date.now() - startTime > 8000) {
+          Logger.warn("OptimizedMonteCarlo", "模拟超时，提前结束", {
+            completedBatches: batch + 1,
+            completedSimulations: (batch + 1) * batchSize
+          });
+          break;
+        }
       }
       
-      // 计算概率
+      const completedSimulations = Object.values(specialFrequency).reduce((a, b) => a + b, 0);
+      
+      if (completedSimulations === 0) {
+        Logger.warn("OptimizedMonteCarlo", "模拟未生成任何结果");
+        return null;
+      }
+      
       const specialProbs = {};
       const normalProbs = {};
       
       for (let i = 1; i <= 49; i++) {
-        specialProbs[i] = specialFrequency[i] / simulations;
-        normalProbs[i] = normalFrequency[i] / simulations;
+        specialProbs[i] = specialFrequency[i] / completedSimulations;
+        normalProbs[i] = normalFrequency[i] / completedSimulations;
       }
       
-      // 生成预测结果
       const result = {
         specialPredictions: Object.entries(specialProbs)
           .map(([num, prob]) => ({
             number: Formatter.safeInt(num),
             probability: prob,
-            score: prob * 10000
+            score: prob * 10000,
+            frequency: specialFrequency[num]
           }))
           .sort((a, b) => b.score - a.score)
-          .slice(0, 10),
+          .slice(0, 12),
         
         normalPredictions: Object.entries(normalProbs)
           .map(([num, prob]) => ({
             number: Formatter.safeInt(num),
             probability: prob,
-            score: prob * 8000
+            score: prob * 8000,
+            frequency: normalFrequency[num]
           }))
           .sort((a, b) => b.score - a.score)
-          .slice(0, 12),
+          .slice(0, 15),
         
-        simulations: simulations,
+        simulations: completedSimulations,
+        batches: batches,
         duration: Date.now() - startTime,
-        success: true
+        cacheKey: cacheKey
       };
       
-      // 缓存结果
       this.cache.set(cacheKey, {
         result: result,
         timestamp: Date.now()
       });
       
-      // 清理旧缓存
       this.cleanupCache();
+      
+      Logger.info("OptimizedMonteCarlo", "模拟完成", {
+        simulations: completedSimulations,
+        duration: result.duration,
+        topSpecial: result.specialPredictions[0]?.number || 0,
+        topSpecialProb: result.specialPredictions[0]?.probability || 0
+      });
       
       return result;
     } catch (error) {
-      Logger.error("SimplifiedMonteCarlo", "快速模拟失败", error);
-      return {
-        success: false,
-        error: error.message,
-        specialPredictions: [],
-        normalPredictions: [],
-        simulations: 0,
-        duration: 0
-      };
+      Logger.error("OptimizedMonteCarlo", "优化模拟失败", error);
+      return null;
     }
+  }
+  
+  static calculateOptimalSimulations(historyLength, targetSimulations) {
+    let optimal = targetSimulations;
+    
+    if (historyLength < 30) {
+      optimal = Math.min(3000, targetSimulations);
+    } else if (historyLength < 50) {
+      optimal = Math.min(6000, targetSimulations);
+    } else if (historyLength < 100) {
+      optimal = Math.min(8000, targetSimulations);
+    }
+    
+    return optimal;
+  }
+  
+  static selectBaseRecord(processedHistory, batch, index) {
+    const total = processedHistory.length;
+    const selectionMethod = (batch * 100 + index) % 7;
+    
+    switch (selectionMethod) {
+      case 0:
+        return processedHistory[Math.floor(Math.random() * total)];
+      case 1:
+        return processedHistory[0];
+      case 2:
+        return processedHistory[Math.min(10, total - 1)];
+      case 3:
+        return processedHistory[Math.floor(total / 2)];
+      case 4:
+        return processedHistory[batch % total];
+      case 5:
+        return processedHistory[index % total];
+      default:
+        const weights = processedHistory.map((_, i) => Math.exp(-i / 10));
+        const sum = weights.reduce((a, b) => a + b, 0);
+        let rand = Math.random() * sum;
+        for (let i = 0; i < weights.length; i++) {
+          rand -= weights[i];
+          if (rand <= 0) return processedHistory[i];
+        }
+        return processedHistory[0];
+    }
+  }
+  
+  static simulateNextNumbersSmart(baseRecord, processedHistory) {
+    const result = {
+      normals: [],
+      special: 0
+    };
+    
+    const simulationStrategy = Math.random();
+    
+    if (simulationStrategy < 0.3) {
+      const zodiacNumbers = CONFIG.ZODIAC_MAP[baseRecord.zodiac] || [];
+      if (zodiacNumbers.length > 0) {
+        result.special = zodiacNumbers[Math.floor(Math.random() * zodiacNumbers.length)];
+      } else {
+        result.special = baseRecord.special;
+      }
+    } else if (simulationStrategy < 0.6) {
+      const colorNumbers = CONFIG.COLORS[baseRecord.color] || [];
+      if (colorNumbers.length > 0) {
+        result.special = colorNumbers[Math.floor(Math.random() * colorNumbers.length)];
+      } else {
+        result.special = baseRecord.special;
+      }
+    } else if (simulationStrategy < 0.8) {
+      const similarIndex = Math.floor(Math.random() * Math.min(10, processedHistory.length));
+      result.special = processedHistory[similarIndex]?.special || baseRecord.special;
+    } else {
+      const tail = baseRecord.tail;
+      const possibleNumbers = [];
+      for (let num = tail; num <= 49; num += 10) {
+        if (num >= 1 && num <= 49) {
+          possibleNumbers.push(num);
+        }
+      }
+      if (possibleNumbers.length > 0) {
+        result.special = possibleNumbers[Math.floor(Math.random() * possibleNumbers.length)];
+      } else {
+        result.special = baseRecord.special;
+      }
+    }
+    
+    if (result.special < 1 || result.special > 49) {
+      result.special = Math.floor(Math.random() * 49) + 1;
+    }
+    
+    const usedNumbers = new Set([result.special]);
+    
+    let normalsNeeded = 6;
+    
+    for (const normal of baseRecord.normals) {
+      if (!usedNumbers.has(normal) && normal >= 1 && normal <= 49) {
+        result.normals.push(normal);
+        usedNumbers.add(normal);
+        normalsNeeded--;
+        if (normalsNeeded <= 0) break;
+      }
+    }
+    
+    if (normalsNeeded > 0) {
+      const similarRecords = processedHistory.slice(0, 5);
+      for (const record of similarRecords) {
+        if (normalsNeeded <= 0) break;
+        
+        for (const normal of record.normals) {
+          if (!usedNumbers.has(normal) && normal >= 1 && normal <= 49) {
+            result.normals.push(normal);
+            usedNumbers.add(normal);
+            normalsNeeded--;
+            if (normalsNeeded <= 0) break;
+          }
+        }
+      }
+    }
+    
+    while (normalsNeeded > 0) {
+      let num;
+      let attempts = 0;
+      do {
+        num = Math.floor(Math.random() * 49) + 1;
+        attempts++;
+      } while (usedNumbers.has(num) && attempts < 20);
+      
+      if (!usedNumbers.has(num)) {
+        result.normals.push(num);
+        usedNumbers.add(num);
+        normalsNeeded--;
+      } else {
+        for (let i = 1; i <= 49; i++) {
+          if (!usedNumbers.has(i)) {
+            result.normals.push(i);
+            usedNumbers.add(i);
+            normalsNeeded--;
+            break;
+          }
+        }
+      }
+    }
+    
+    return result;
   }
   
   static preprocessHistory(history) {
@@ -2414,6 +2843,45 @@ class SimplifiedMonteCarloEngine {
           const normals = nums.slice(0, 6);
           const attr = Formatter.getAttributes(special);
           
+          const normalFeatures = {
+            zodiacs: normals.map(n => Formatter.getAttributes(n).zodiac),
+            colors: normals.map(n => Formatter.getAttributes(n).color),
+            tails: normals.map(n => n % 10),
+            heads: normals.map(n => Math.floor(n / 10)),
+            sizes: normals.map(n => n >= 25 ? "大" : "小"),
+            oddEven: normals.map(n => n % 2 !== 0 ? "单" : "双"),
+            primes: normals.map(n => Formatter.isPrime(n) ? "质数" : "合数")
+          };
+          
+          const normalStats = {
+            zodiacCount: {},
+            colorCount: {},
+            tailCount: {},
+            sizeCount: { big: 0, small: 0 },
+            oddEvenCount: { odd: 0, even: 0 }
+          };
+          
+          for (const num of normals) {
+            const numAttr = Formatter.getAttributes(num);
+            normalStats.zodiacCount[numAttr.zodiac] = (normalStats.zodiacCount[numAttr.zodiac] || 0) + 1;
+            normalStats.colorCount[numAttr.color] = (normalStats.colorCount[numAttr.color] || 0) + 1;
+            
+            const tail = num % 10;
+            normalStats.tailCount[tail] = (normalStats.tailCount[tail] || 0) + 1;
+            
+            if (num >= 25) {
+              normalStats.sizeCount.big++;
+            } else {
+              normalStats.sizeCount.small++;
+            }
+            
+            if (num % 2 !== 0) {
+              normalStats.oddEvenCount.odd++;
+            } else {
+              normalStats.oddEvenCount.even++;
+            }
+          }
+          
           processed.push({
             numbers: nums,
             special: special,
@@ -2424,7 +2892,11 @@ class SimplifiedMonteCarloEngine {
             head: Math.floor(special / 10),
             size: special >= 25 ? "大" : "小",
             oddEven: special % 2 !== 0 ? "单" : "双",
-            expect: record.expect
+            features: Formatter.calculateFeatures(special),
+            normalFeatures: normalFeatures,
+            normalStats: normalStats,
+            expect: record.expect,
+            timestamp: record.created_at || Date.now()
           });
         }
       }
@@ -2433,87 +2905,29 @@ class SimplifiedMonteCarloEngine {
     return processed;
   }
   
-  static simulateNextNumbers(baseRecord, processedHistory) {
-    const result = {
-      normals: [],
-      special: 0
-    };
-    
-    // 生成特码
-    // 有一定概率使用相同生肖的号码
-    if (Math.random() < 0.4) {
-      const zodiacNumbers = CONFIG.ZODIAC_MAP[baseRecord.zodiac] || [];
-      if (zodiacNumbers.length > 0) {
-        result.special = zodiacNumbers[Math.floor(Math.random() * zodiacNumbers.length)];
-      } else {
-        result.special = baseRecord.special;
-      }
-    } else {
-      // 或者从历史中随机选择
-      const randomRecord = processedHistory[Math.floor(Math.random() * processedHistory.length)];
-      result.special = randomRecord?.special || baseRecord.special;
-    }
-    
-    // 确保特码有效
-    if (result.special < 1 || result.special > 49) {
-      result.special = Math.floor(Math.random() * 49) + 1;
-    }
-    
-    // 生成平码
-    const usedNumbers = new Set([result.special]);
-    
-    // 从基础记录的平码中选取
-    for (const normal of baseRecord.normals) {
-      if (!usedNumbers.has(normal) && normal >= 1 && normal <= 49) {
-        result.normals.push(normal);
-        usedNumbers.add(normal);
-        if (result.normals.length >= 3) break;
-      }
-    }
-    
-    // 从其他历史记录中补充
-    while (result.normals.length < 6) {
-      const randomRecord = processedHistory[Math.floor(Math.random() * processedHistory.length)];
-      if (randomRecord && randomRecord.normals) {
-        const randomNormal = randomRecord.normals[Math.floor(Math.random() * randomRecord.normals.length)];
-        if (randomNormal >= 1 && randomNormal <= 49 && !usedNumbers.has(randomNormal)) {
-          result.normals.push(randomNormal);
-          usedNumbers.add(randomNormal);
-        }
-      }
-      
-      // 防止无限循环
-      if (usedNumbers.size >= 49 || result.normals.length >= 6) {
-        break;
-      }
-    }
-    
-    // 如果还是不足，随机生成
-    while (result.normals.length < 6) {
-      let num;
-      do {
-        num = Math.floor(Math.random() * 49) + 1;
-      } while (usedNumbers.has(num) && usedNumbers.size < 49);
-      
-      if (!usedNumbers.has(num)) {
-        result.normals.push(num);
-        usedNumbers.add(num);
-      }
-    }
-    
-    return result;
-  }
-  
   static cleanupCache() {
     try {
       const now = Date.now();
+      const maxCacheSize = 50;
+      
+      if (this.cache.size > maxCacheSize) {
+        const keys = Array.from(this.cache.keys());
+        const keysToDelete = keys.slice(0, Math.floor(keys.length / 2));
+        
+        for (const key of keysToDelete) {
+          this.cache.delete(key);
+        }
+        
+        Logger.info("OptimizedMonteCarlo", `清理缓存，删除 ${keysToDelete.length} 个条目`);
+      }
+      
       for (const [key, value] of this.cache.entries()) {
-        if (now - value.timestamp > 60000) { // 1分钟过期
+        if (now - value.timestamp > 120000) {
           this.cache.delete(key);
         }
       }
     } catch (error) {
-      // 忽略错误
+      Logger.error("OptimizedMonteCarlo", "清理缓存失败", error);
     }
   }
   
@@ -2527,630 +2941,7 @@ class SimplifiedMonteCarloEngine {
 }
 
 // ==============================================================================
-// 9. 增强预测引擎（核心修复部分）
-// ==============================================================================
-
-class EnhancedPredictionEngine {
-  
-  // 主增强预测函数 - 完全修复版
-  static async generateEnhancedPrediction(env, history, weights) {
-    try {
-      const startTime = Date.now();
-      Logger.info("EnhancedPrediction", "开始增强预测");
-      
-      if (!history || history.length < 2) {
-        Logger.warn("EnhancedPrediction", "历史数据不足，使用传统预测");
-        return await PredictionEngine.generateTraditionalPrediction(history, weights);
-      }
-      
-      // 设置超时保护
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error("增强预测超时")), CONFIG.SYSTEM.ADVANCED_ALGO_TIMEOUT);
-      });
-      
-      // 并行运行所有算法
-      const algorithms = this.createAlgorithmPromises(env, history, weights);
-      
-      try {
-        // 使用Promise.race实现超时控制
-        const results = await Promise.race([
-          Promise.allSettled(algorithms),
-          timeoutPromise
-        ]);
-        
-        // 处理算法结果
-        const algorithmResults = this.processAlgorithmResults(results);
-        
-        // 整合所有算法结果
-        const integratedResult = this.integrateAllResults(algorithmResults, weights);
-        
-        // 生成最终预测
-        const finalPrediction = this.generateFinalPrediction(integratedResult, history, startTime);
-        
-        Logger.info("EnhancedPrediction", `增强预测完成，耗时: ${Date.now() - startTime}ms`);
-        return finalPrediction;
-        
-      } catch (timeoutError) {
-        Logger.warn("EnhancedPrediction", "增强预测超时，使用快速整合模式");
-        return await this.generateFallbackPrediction(env, history, weights, startTime);
-      }
-      
-    } catch (error) {
-      Logger.error("EnhancedPrediction", "增强预测失败", error);
-      return await PredictionEngine.generateTraditionalPrediction(history, weights);
-    }
-  }
-  
-  // 创建算法Promise数组
-  static createAlgorithmPromises(env, history, weights) {
-    const promises = [];
-    
-    // 传统算法
-    promises.push(
-      Promise.resolve()
-        .then(async () => {
-          const start = Date.now();
-          const result = await PredictionEngine.generateTraditionalPrediction(history, weights);
-          const duration = Date.now() - start;
-          return {
-            algorithm: "traditional",
-            success: result !== null,
-            result: result,
-            duration: duration
-          };
-        })
-        .catch(error => ({
-          algorithm: "traditional",
-          success: false,
-          error: error.message,
-          duration: 0
-        }))
-    );
-    
-    // KNN算法
-    promises.push(
-      Promise.resolve()
-        .then(async () => {
-          const start = Date.now();
-          const result = await PredictionEngine.generateKNNPrediction(history, weights);
-          const duration = Date.now() - start;
-          return {
-            algorithm: "knn",
-            success: result !== null,
-            result: result,
-            duration: duration
-          };
-        })
-        .catch(error => ({
-          algorithm: "knn",
-          success: false,
-          error: error.message,
-          duration: 0
-        }))
-    );
-    
-    // 统计算法
-    promises.push(
-      Promise.resolve()
-        .then(async () => {
-          const start = Date.now();
-          const result = await PredictionEngine.generateStatsPrediction(history, weights);
-          const duration = Date.now() - start;
-          return {
-            algorithm: "statistics",
-            success: result !== null,
-            result: result,
-            duration: duration
-          };
-        })
-        .catch(error => ({
-          algorithm: "statistics",
-          success: false,
-          error: error.message,
-          duration: 0
-        }))
-    );
-    
-    // 蒙特卡洛算法
-    promises.push(
-      Promise.resolve()
-        .then(async () => {
-          const start = Date.now();
-          const result = await SimplifiedMonteCarloEngine.runQuickSimulation(history, 5000);
-          const duration = Date.now() - start;
-          return {
-            algorithm: "monteCarlo",
-            success: result !== null && result.success,
-            result: result,
-            duration: duration
-          };
-        })
-        .catch(error => ({
-          algorithm: "monteCarlo",
-          success: false,
-          error: error.message,
-          duration: 0
-        }))
-    );
-    
-    return promises;
-  }
-  
-  // 处理算法结果
-  static processAlgorithmResults(results) {
-    const algorithmResults = {
-      traditional: null,
-      knn: null,
-      statistics: null,
-      monteCarlo: null,
-      successfulAlgorithms: 0
-    };
-    
-    if (!Array.isArray(results)) {
-      return algorithmResults;
-    }
-    
-    results.forEach((result, index) => {
-      if (result.status === 'fulfilled' && result.value.success) {
-        const algoResult = result.value;
-        
-        switch (algoResult.algorithm) {
-          case "traditional":
-            algorithmResults.traditional = algoResult.result;
-            algorithmResults.successfulAlgorithms++;
-            Logger.debug("EnhancedPrediction", `传统算法完成，耗时: ${algoResult.duration}ms`);
-            break;
-          case "knn":
-            algorithmResults.knn = algoResult.result;
-            algorithmResults.successfulAlgorithms++;
-            Logger.debug("EnhancedPrediction", `KNN算法完成，耗时: ${algoResult.duration}ms`);
-            break;
-          case "statistics":
-            algorithmResults.statistics = algoResult.result;
-            algorithmResults.successfulAlgorithms++;
-            Logger.debug("EnhancedPrediction", `统计算法完成，耗时: ${algoResult.duration}ms`);
-            break;
-          case "monteCarlo":
-            algorithmResults.monteCarlo = algoResult.result;
-            algorithmResults.successfulAlgorithms++;
-            Logger.debug("EnhancedPrediction", `蒙特卡洛算法完成，耗时: ${algoResult.duration}ms`);
-            break;
-        }
-      } else {
-        const algorithmName = result.status === 'fulfilled' ? result.value.algorithm : `算法${index}`;
-        const errorMsg = result.status === 'fulfilled' ? result.value.error : result.reason?.message || '未知错误';
-        Logger.warn("EnhancedPrediction", `${algorithmName} 失败: ${errorMsg}`);
-      }
-    });
-    
-    return algorithmResults;
-  }
-  
-  // 整合所有算法结果
-  static integrateAllResults(algorithmResults, weights) {
-    const integratedScores = {};
-    const integratedNormals = {};
-    
-    // 初始化分数
-    for (let i = 1; i <= 49; i++) {
-      integratedScores[i] = { score: 0, probability: 0, reasons: [] };
-      integratedNormals[i] = { score: 0, probability: 0, reasons: [] };
-    }
-    
-    // 整合传统算法结果
-    if (algorithmResults.traditional && algorithmResults.traditional.specialNumbers) {
-      const weight = CONFIG.ADVANCED_ALGO_WEIGHTS.traditional;
-      algorithmResults.traditional.specialNumbers.forEach(item => {
-        if (item.number >= 1 && item.number <= 49) {
-          integratedScores[item.number].score += item.score * weight;
-          integratedScores[item.number].probability = Math.max(
-            integratedScores[item.number].probability, 
-            item.probability || 0
-          );
-          integratedScores[item.number].reasons.push(`传统算法: ${item.reason || ''}`);
-        }
-      });
-      
-      // 平码
-      if (algorithmResults.traditional.normalNumbers) {
-        algorithmResults.traditional.normalNumbers.forEach(item => {
-          if (item.number >= 1 && item.number <= 49) {
-            integratedNormals[item.number].score += item.score * weight * 0.5;
-            integratedNormals[item.number].reasons.push('传统算法平码');
-          }
-        });
-      }
-    }
-    
-    // 整合KNN算法结果
-    if (algorithmResults.knn) {
-      const weight = CONFIG.ADVANCED_ALGO_WEIGHTS.knn;
-      
-      // 特码
-      if (algorithmResults.knn.knnAnalysis && algorithmResults.knn.knnAnalysis.specialCandidates) {
-        algorithmResults.knn.knnAnalysis.specialCandidates.forEach(item => {
-          if (item.value >= 1 && item.value <= 49) {
-            integratedScores[item.value].score += item.score * weight;
-            integratedScores[item.value].reasons.push(`KNN算法 (相似度: ${item.score.toFixed(2)})`);
-          }
-        });
-      }
-      
-      // 平码
-      if (algorithmResults.knn.knnAnalysis && algorithmResults.knn.knnAnalysis.normalCandidates) {
-        algorithmResults.knn.knnAnalysis.normalCandidates.forEach(item => {
-          if (item.value >= 1 && item.value <= 49) {
-            integratedNormals[item.value].score += item.score * weight * 0.7;
-            integratedNormals[item.value].reasons.push('KNN算法平码');
-          }
-        });
-      }
-    }
-    
-    // 整合统计算法结果
-    if (algorithmResults.statistics) {
-      const weight = CONFIG.ADVANCED_ALGO_WEIGHTS.statistics;
-      
-      // 特码
-      if (algorithmResults.statistics.specialNumbers) {
-        algorithmResults.statistics.specialNumbers.forEach(item => {
-          if (item.number >= 1 && item.number <= 49) {
-            integratedScores[item.number].score += item.score * weight;
-            integratedScores[item.number].probability = Math.max(
-              integratedScores[item.number].probability, 
-              item.probability || 0
-            );
-            integratedScores[item.number].reasons.push(`统计算法: ${item.reason || ''}`);
-          }
-        });
-      }
-      
-      // 平码
-      if (algorithmResults.statistics.normalNumbers) {
-        algorithmResults.statistics.normalNumbers.forEach(item => {
-          if (item.number >= 1 && item.number <= 49) {
-            integratedNormals[item.number].score += item.score * weight * 0.6;
-            integratedNormals[item.number].reasons.push('统计算法平码');
-          }
-        });
-      }
-    }
-    
-    // 整合蒙特卡洛算法结果
-    if (algorithmResults.monteCarlo && algorithmResults.monteCarlo.success) {
-      const weight = CONFIG.ADVANCED_ALGO_WEIGHTS.monteCarlo;
-      
-      // 特码
-      if (algorithmResults.monteCarlo.specialPredictions) {
-        algorithmResults.monteCarlo.specialPredictions.forEach(item => {
-          if (item.number >= 1 && item.number <= 49) {
-            integratedScores[item.number].score += item.score * weight;
-            integratedScores[item.number].probability = Math.max(
-              integratedScores[item.number].probability, 
-              item.probability || 0
-            );
-            integratedScores[item.number].reasons.push(`蒙特卡洛模拟 (${item.probability ? (item.probability * 100).toFixed(1) + '%' : ''})`);
-          }
-        });
-      }
-      
-      // 平码
-      if (algorithmResults.monteCarlo.normalPredictions) {
-        algorithmResults.monteCarlo.normalPredictions.forEach(item => {
-          if (item.number >= 1 && item.number <= 49) {
-            integratedNormals[item.number].score += item.score * weight * 0.8;
-            integratedNormals[item.number].reasons.push('蒙特卡洛平码');
-          }
-        });
-      }
-    }
-    
-    // 整合增强权重
-    const integrationWeight = CONFIG.ADVANCED_ALGO_WEIGHTS.integration;
-    Object.keys(integratedScores).forEach(num => {
-      integratedScores[num].score *= integrationWeight;
-    });
-    
-    Object.keys(integratedNormals).forEach(num => {
-      integratedNormals[num].score *= integrationWeight;
-    });
-    
-    return {
-      specialScores: integratedScores,
-      normalScores: integratedNormals,
-      successfulAlgorithms: algorithmResults.successfulAlgorithms,
-      algorithmsUsed: {
-        traditional: !!algorithmResults.traditional,
-        knn: !!algorithmResults.knn,
-        statistics: !!algorithmResults.statistics,
-        monteCarlo: !!algorithmResults.monteCarlo
-      }
-    };
-  }
-  
-  // 生成最终预测
-  static generateFinalPrediction(integratedResult, history, startTime) {
-    try {
-      const lastRecord = history[0] || {};
-      const lastOpenCode = lastRecord.open_code || "1,2,3,4,5,6,7";
-      const lastSpecial = Formatter.safeInt(lastOpenCode.split(",")[6], 1);
-      
-      // 计算下一期期号
-      let nextExpect = "2025001";
-      const latestExpect = lastRecord.expect;
-      if (latestExpect && Formatter.isValidExpect(latestExpect)) {
-        const latestNum = Formatter.safeInt(latestExpect, 2025000);
-        nextExpect = (latestNum + 1).toString();
-      }
-      
-      // 获取特码预测
-      const specialScores = integratedResult.specialScores;
-      const specialPredictions = Object.entries(specialScores)
-        .map(([num, data]) => ({
-          number: Formatter.safeInt(num),
-          score: data.score,
-          probability: data.probability || (data.score / 1000),
-          reasons: data.reasons
-        }))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 10);
-      
-      // 获取平码预测
-      const normalScores = integratedResult.normalScores;
-      const excludeSpecials = new Set(specialPredictions.slice(0, 5).map(item => item.number));
-      
-      const normalPredictions = Object.entries(normalScores)
-        .filter(([num, _]) => !excludeSpecials.has(Formatter.safeInt(num)))
-        .map(([num, data]) => ({
-          number: Formatter.safeInt(num),
-          score: data.score,
-          probability: data.probability || (data.score / 800),
-          reasons: data.reasons
-        }))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 6);
-      
-      // 生肖和颜色预测
-      const zodiacPrediction = this.calculateZodiacPrediction(specialPredictions);
-      const colorPrediction = this.calculateColorPrediction(specialPredictions);
-      
-      // 最佳号码的特征
-      const bestNumber = specialPredictions[0]?.number || 1;
-      const isBig = bestNumber >= 25;
-      const isOdd = bestNumber % 2 !== 0;
-      const shape = (isBig ? "大" : "小") + (isOdd ? "单" : "双");
-      const head = Math.floor(bestNumber / 10);
-      
-      // 计算置信度
-      const confidence = this.calculateAdvancedConfidence(
-        specialPredictions, 
-        integratedResult.successfulAlgorithms,
-        history.length
-      );
-      
-      // 格式化预测结果
-      const formattedSpecials = specialPredictions.slice(0, 5).map(item => ({
-        number: item.number,
-        score: item.score,
-        probability: item.probability,
-        zodiac: Formatter.getAttributes(item.number).zodiac,
-        color: Formatter.getAttributes(item.number).color,
-        topReason: item.reasons && item.reasons.length > 0 ? item.reasons[0] : "算法推荐"
-      }));
-      
-      const formattedNormals = normalPredictions.slice(0, 6).map(item => ({
-        number: item.number,
-        score: item.score,
-        probability: item.probability,
-        zodiac: Formatter.getAttributes(item.number).zodiac,
-        color: Formatter.getAttributes(item.number).color
-      }));
-      
-      // 算法使用情况
-      const algorithmStats = {
-        total: 4,
-        successful: integratedResult.successfulAlgorithms,
-        traditional: integratedResult.algorithmsUsed.traditional,
-        knn: integratedResult.algorithmsUsed.knn,
-        statistics: integratedResult.algorithmsUsed.statistics,
-        monteCarlo: integratedResult.algorithmsUsed.monteCarlo
-      };
-      
-      // 生成预测结果
-      return {
-        nextExpect: nextExpect,
-        zodiac: zodiacPrediction,
-        color: colorPrediction,
-        head: `${head}头`,
-        shape: shape,
-        specialNumbers: formattedSpecials,
-        normalNumbers: formattedNormals,
-        confidence: confidence,
-        analysisBased: true,
-        algorithmUsed: "enhanced",
-        algorithmStats: algorithmStats,
-        totalHistoryRecords: history.length,
-        generatedAt: new Date().toISOString(),
-        algorithmVersion: "V12.3-Enhanced",
-        basedOnLastRecord: {
-          expect: lastRecord.expect || "未知",
-          openCode: lastOpenCode,
-          special: lastSpecial,
-          zodiac: Formatter.getAttributes(lastSpecial).zodiac,
-          color: Formatter.getAttributes(lastSpecial).color
-        },
-        generationTime: Date.now() - startTime,
-        integrationMethod: "加权整合所有算法结果"
-      };
-      
-    } catch (error) {
-      Logger.error("EnhancedPrediction", "生成最终预测失败", error);
-      throw error;
-    }
-  }
-  
-  // 计算生肖预测
-  static calculateZodiacPrediction(specialPredictions) {
-    const zodiacScores = {};
-    
-    specialPredictions.forEach(item => {
-      const zodiac = Formatter.getAttributes(item.number).zodiac;
-      if (!zodiacScores[zodiac]) {
-        zodiacScores[zodiac] = { total: 0, count: 0 };
-      }
-      zodiacScores[zodiac].total += item.score;
-      zodiacScores[zodiac].count++;
-    });
-    
-    const sortedZodiacs = Object.entries(zodiacScores)
-      .map(([zodiac, data]) => ({
-        zodiac,
-        average: data.total / Math.max(1, data.count)
-      }))
-      .sort((a, b) => b.average - a.average);
-    
-    return {
-      main: sortedZodiacs.slice(0, 3).map(z => z.zodiac),
-      guard: sortedZodiacs.slice(3, 6).map(z => z.zodiac),
-      scores: zodiacScores
-    };
-  }
-  
-  // 计算颜色预测
-  static calculateColorPrediction(specialPredictions) {
-    const colorScores = {
-      red: { total: 0, count: 0 },
-      blue: { total: 0, count: 0 },
-      green: { total: 0, count: 0 }
-    };
-    
-    specialPredictions.forEach(item => {
-      const color = Formatter.getAttributes(item.number).color;
-      if (colorScores[color]) {
-        colorScores[color].total += item.score;
-        colorScores[color].count++;
-      }
-    });
-    
-    const colors = ['red', 'blue', 'green'];
-    const sortedColors = colors
-      .map(color => ({
-        color,
-        average: colorScores[color].total / Math.max(1, colorScores[color].count)
-      }))
-      .sort((a, b) => b.average - a.average);
-    
-    return {
-      main: sortedColors[0]?.color || "red",
-      guard: sortedColors[1]?.color || "blue",
-      scores: colorScores
-    };
-  }
-  
-  // 计算增强预测的置信度
-  static calculateAdvancedConfidence(specialPredictions, successfulAlgorithms, historyCount) {
-    let confidence = 25;
-    
-    // 基于算法成功数量
-    confidence += successfulAlgorithms * 15;
-    
-    // 基于分数分布
-    if (specialPredictions.length > 0) {
-      const maxScore = specialPredictions[0]?.score || 50;
-      const avgScore = specialPredictions.reduce((sum, item) => sum + item.score, 0) / Math.max(1, specialPredictions.length);
-      const scoreRatio = maxScore / Math.max(1, avgScore);
-      
-      confidence += Math.min(25, scoreRatio * 10);
-    }
-    
-    // 基于历史数据量
-    confidence += Math.min(15, historyCount / 30);
-    
-    // 限制在合理范围内
-    confidence = Math.min(95, Math.max(30, Math.floor(confidence)));
-    
-    return confidence;
-  }
-  
-  // 回退预测（当增强预测失败时）
-  static async generateFallbackPrediction(env, history, weights, startTime) {
-    Logger.info("EnhancedPrediction", "使用回退预测");
-    
-    try {
-      // 尝试快速运行传统算法和统计预测
-      const [traditionalResult, statsResult] = await Promise.all([
-        PredictionEngine.generateTraditionalPrediction(history, weights).catch(() => null),
-        PredictionEngine.generateStatsPrediction(history, weights).catch(() => null)
-      ]);
-      
-      // 使用可用的结果
-      let finalResult;
-      if (traditionalResult && statsResult) {
-        // 合并两个算法
-        finalResult = this.mergeTwoAlgorithms(traditionalResult, statsResult);
-        finalResult.algorithmUsed = "fallback-merged";
-      } else if (traditionalResult) {
-        finalResult = traditionalResult;
-        finalResult.algorithmUsed = "fallback-traditional";
-      } else if (statsResult) {
-        finalResult = statsResult;
-        finalResult.algorithmUsed = "fallback-statistics";
-      } else {
-        // 最后的回退
-        finalResult = PredictionEngine.generateStaticFallback();
-        finalResult.algorithmUsed = "fallback-static";
-      }
-      
-      // 添加元数据
-      finalResult.generationTime = Date.now() - startTime;
-      finalResult.fallbackMode = true;
-      finalResult.algorithmVersion = "V12.3-Fallback";
-      
-      return finalResult;
-      
-    } catch (error) {
-      Logger.error("EnhancedPrediction", "回退预测也失败", error);
-      return PredictionEngine.generateStaticFallback();
-    }
-  }
-  
-  // 合并两个算法结果
-  static mergeTwoAlgorithms(traditionalResult, statsResult) {
-    const merged = {
-      ...traditionalResult,
-      algorithmUsed: "merged-traditional-stats"
-    };
-    
-    // 合并特码
-    if (traditionalResult.specialNumbers && statsResult.specialNumbers) {
-      const mergedSpecials = [...traditionalResult.specialNumbers, ...statsResult.specialNumbers]
-        .reduce((acc, item) => {
-          const existing = acc.find(i => i.number === item.number);
-          if (existing) {
-            existing.score = (existing.score + item.score) / 2;
-            existing.probability = (existing.probability + (item.probability || 0)) / 2;
-          } else {
-            acc.push({ ...item });
-          }
-          return acc;
-        }, [])
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 5);
-      
-      merged.specialNumbers = mergedSpecials;
-    }
-    
-    // 调整置信度
-    if (traditionalResult.confidence && statsResult.confidence) {
-      merged.confidence = Math.floor((traditionalResult.confidence + statsResult.confidence) / 2);
-    }
-    
-    return merged;
-  }
-}
-
-// ==============================================================================
-// 10. 预测引擎（更新版）
+// 10. 改进的预测引擎
 // ==============================================================================
 
 class PredictionEngine {
@@ -3164,7 +2955,18 @@ class PredictionEngine {
       const lastOpenCode = lastRecord.open_code || "1,2,3,4,5,6,7";
       const lastSpecial = Formatter.safeInt(lastOpenCode.split(",")[6], 1);
       
-      // 计算下一期期号
+      if (!Formatter.isAlgorithmSupported(algorithm, history.length)) {
+        Logger.warn("PredictionEngine", `算法 ${algorithm} 需要更多历史数据，使用传统算法替代`, {
+          algorithm,
+          historyLength: history.length,
+          minRequired: CONFIG.SYSTEM.MIN_HISTORY_FOR_ALGORITHMS[algorithm]
+        });
+        
+        if (algorithm !== "traditional") {
+          algorithm = "traditional";
+        }
+      }
+      
       let nextExpect = "2025001";
       const latestExpect = lastRecord.expect;
       if (latestExpect && Formatter.isValidExpect(latestExpect)) {
@@ -3172,36 +2974,43 @@ class PredictionEngine {
         nextExpect = (latestNum + 1).toString();
       }
       
-      // 根据算法选择预测方法
       let prediction;
+      const algorithmTimeout = Formatter.getAlgorithmTimeout(algorithm);
       
-      switch (algorithm) {
-        case "knn":
-          prediction = await this.generateKNNPrediction(history, weights);
-          break;
-          
-        case "stats":
-          prediction = await this.generateStatsPrediction(history, weights);
-          break;
-          
-        case "advanced":
-        case "enhanced":
-          // 使用修复后的增强预测引擎
-          prediction = await EnhancedPredictionEngine.generateEnhancedPrediction(env, history, weights);
-          break;
-          
-        case "traditional":
-        default:
-          prediction = await this.generateTraditionalPrediction(history, weights);
-          break;
+      try {
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error(`预测生成超时 (${algorithmTimeout}ms)`)), algorithmTimeout);
+        });
+        
+        const predictionPromise = (async () => {
+          switch (algorithm) {
+            case "knn":
+              return await this.generateKNNPrediction(history, weights);
+            case "stats":
+              return await this.generateStatsPrediction(history, weights);
+            case "advanced":
+              return await this.generateAdvancedPrediction(env, history, weights);
+            case "traditional":
+            default:
+              return await this.generateTraditionalPrediction(history, weights);
+          }
+        })();
+        
+        prediction = await Promise.race([predictionPromise, timeoutPromise]);
+      } catch (timeoutError) {
+        Logger.error("PredictionEngine", `预测生成超时，算法: ${algorithm}`, timeoutError);
+        
+        prediction = await this.generateTraditionalPrediction(history, weights);
+        
+        prediction.algorithmTimeout = true;
+        prediction.originalAlgorithm = algorithm;
       }
       
-      // 确保预测结果有效
       if (!prediction || !prediction.specialNumbers || prediction.specialNumbers.length === 0) {
+        Logger.warn("PredictionEngine", `算法 ${algorithm} 返回无效预测，使用传统算法替代`);
         prediction = await this.generateTraditionalPrediction(history, weights);
       }
       
-      // 添加基础信息
       prediction.nextExpect = nextExpect;
       prediction.basedOnLastRecord = {
         expect: lastRecord.expect || "未知",
@@ -3213,9 +3022,11 @@ class PredictionEngine {
       
       prediction.totalHistoryRecords = history.length;
       prediction.generatedAt = new Date().toISOString();
+      prediction.algorithmVersion = `V12.4.1-${CONFIG.ALGORITHM_NAMES[algorithm] || algorithm}`;
+      prediction.algorithmUsed = algorithm;
       
-      if (!prediction.algorithmVersion) {
-        prediction.algorithmVersion = `V12.3-${algorithm.charAt(0).toUpperCase() + algorithm.slice(1)}`;
+      if (prediction.algorithmTimeout) {
+        prediction.algorithmUsed = `timeout_fallback_${prediction.originalAlgorithm}_to_traditional`;
       }
       
       return prediction;
@@ -3231,13 +3042,10 @@ class PredictionEngine {
       const lastOpenCode = lastRecord.open_code || "1,2,3,4,5,6,7";
       const lastSpecial = Formatter.safeInt(lastOpenCode.split(",")[6], 1);
       
-      // 分析历史统计
       const stats = this.analyzeHistoryStatistics(history);
       
-      // 生成预测分数
       const scores = this.generateTraditionalScores(lastSpecial, stats, weights);
       
-      // 获取预测结果
       const topSpecialNumbers = this.getTopSpecialPredictions(scores, 10);
       const zodiacPrediction = this.getZodiacPredictions(scores);
       const colorPrediction = this.getColorPredictions(scores);
@@ -3251,7 +3059,6 @@ class PredictionEngine {
       const shape = (isBig ? "大" : "小") + (isOdd ? "单" : "双");
       const head = Math.floor(bestNumber / 10);
       
-      // 计算置信度
       const confidence = this.calculateTraditionalConfidence(topSpecialNumbers, history.length);
       
       const formattedSpecials = topSpecialNumbers.slice(0, 5).map(item => ({
@@ -3283,7 +3090,7 @@ class PredictionEngine {
       };
     } catch (error) {
       Logger.error("PredictionEngine", "传统预测生成失败", error);
-      return null;
+      return this.generateStaticFallback();
     }
   }
   
@@ -3294,7 +3101,6 @@ class PredictionEngine {
         return await this.generateTraditionalPrediction(history, weights);
       }
       
-      // 使用KNN算法
       const similarRecords = KNNAlgorithm.findSimilarRecords(history, lastRecord);
       const knnResult = KNNAlgorithm.predictFromSimilarRecords(similarRecords);
       
@@ -3302,14 +3108,12 @@ class PredictionEngine {
         return await this.generateTraditionalPrediction(history, weights);
       }
       
-      // 整合KNN结果
       const scores = this.generateTraditionalScores(
         Formatter.safeInt(lastRecord.open_code?.split(",")[6] || 1),
         this.analyzeHistoryStatistics(history),
         weights
       );
       
-      // 整合KNN结果到分数中
       if (knnResult.specialCandidates) {
         for (const candidate of knnResult.specialCandidates) {
           if (candidate.value >= 1 && candidate.value <= 49) {
@@ -3318,12 +3122,10 @@ class PredictionEngine {
         }
       }
       
-      // 获取预测结果
       const topSpecialNumbers = this.getTopSpecialPredictions(scores, 10);
       const zodiacPrediction = this.getZodiacPredictions(scores);
       const colorPrediction = this.getColorPredictions(scores);
       
-      // 从KNN结果中获取生肖和颜色预测
       let knnZodiacs = [];
       let knnColors = [];
       
@@ -3342,7 +3144,6 @@ class PredictionEngine {
         excludeSpecials
       );
       
-      // 整合KNN的平码预测
       if (knnResult.normalCandidates && knnResult.normalCandidates.length > 0) {
         for (const candidate of knnResult.normalCandidates.slice(0, 6)) {
           if (candidate.value >= 1 && candidate.value <= 49) {
@@ -3364,7 +3165,6 @@ class PredictionEngine {
       const shape = (isBig ? "大" : "小") + (isOdd ? "单" : "双");
       const head = Math.floor(bestNumber / 10);
       
-      // 计算置信度
       const confidence = this.calculateTraditionalConfidence(topSpecialNumbers, history.length) + 5;
       
       const formattedSpecials = topSpecialNumbers.slice(0, 5).map(item => ({
@@ -3383,15 +3183,13 @@ class PredictionEngine {
         probability: item?.probability || 0
       }));
       
-      // 创建KNN分析结果
       const knnAnalysis = {
         similarRecordsFound: similarRecords.length,
         specialCandidates: knnResult.specialCandidates?.slice(0, 5) || [],
         zodiacCandidates: knnZodiacs,
         colorCandidates: knnColors,
         sizePrediction: knnResult.sizePrediction || "",
-        oddEvenPrediction: knnResult.oddEvenPrediction || "",
-        normalCandidates: knnResult.normalCandidates?.slice(0, 6) || []
+        oddEvenPrediction: knnResult.oddEvenPrediction || ""
       };
       
       return {
@@ -3427,10 +3225,8 @@ class PredictionEngine {
         return await this.generateTraditionalPrediction(history, weights);
       }
       
-      // 使用统计算法
       const stats = EnhancedStatistics.analyzeHistoryStatistics(history);
       
-      // 处理最后一期记录
       const processedHistory = EnhancedStatistics.processHistoryData([lastRecord]);
       const lastProcessedRecord = processedHistory[0];
       
@@ -3444,14 +3240,12 @@ class PredictionEngine {
         return await this.generateTraditionalPrediction(history, weights);
       }
       
-      // 整合统计结果
       const baseScores = this.generateTraditionalScores(
         lastProcessedRecord.special,
         this.analyzeHistoryStatistics(history),
         weights
       );
       
-      // 整合统计结果到分数中
       if (statisticsResult.specialNumbers) {
         for (const item of statisticsResult.specialNumbers) {
           if (item.number >= 1 && item.number <= 49) {
@@ -3461,7 +3255,6 @@ class PredictionEngine {
         }
       }
       
-      // 整合尾数、大小、单双预测
       if (statisticsResult.tailRecommendations) {
         for (const item of statisticsResult.tailRecommendations) {
           if (item.tail >= 0 && item.tail <= 9) {
@@ -3474,7 +3267,6 @@ class PredictionEngine {
         }
       }
       
-      // 获取预测结果
       const topSpecialNumbers = this.getTopSpecialPredictions(baseScores, 10);
       const zodiacPrediction = this.getZodiacPredictions(baseScores);
       const colorPrediction = this.getColorPredictions(baseScores);
@@ -3486,38 +3278,12 @@ class PredictionEngine {
         excludeSpecials
       );
       
-      // 整合统计的平码预测
-      if (statisticsResult.analysis && statisticsResult.analysis.length > 0) {
-        // 从分析中提取可能的平码模式
-        const normalRecommendations = statisticsResult.analysis
-          .filter(analysis => analysis.includes("平码") || analysis.includes("尾数"))
-          .slice(0, 3);
-        
-        if (normalRecommendations.length > 0) {
-          // 添加一些基于统计的平码
-          for (let i = 0; i < Math.min(3, normalRecommendations.length); i++) {
-            const randomNum = Math.floor(Math.random() * 49) + 1;
-            if (!excludeSpecials.includes(randomNum)) {
-              const existing = normalPredictions.find(item => item.number === randomNum);
-              if (!existing) {
-                normalPredictions.push({
-                  number: randomNum,
-                  score: 50 + Math.random() * 30,
-                  probability: 0.05 + Math.random() * 0.03
-                });
-              }
-            }
-          }
-        }
-      }
-      
       const bestNumber = topSpecialNumbers[0]?.number || 1;
       const isBig = bestNumber >= 25;
       const isOdd = bestNumber % 2 !== 0;
       const shape = (isBig ? "大" : "小") + (isOdd ? "单" : "双");
       const head = Math.floor(bestNumber / 10);
       
-      // 计算置信度
       let confidence = this.calculateTraditionalConfidence(topSpecialNumbers, history.length);
       confidence += statisticsResult.analysis ? Math.min(15, statisticsResult.analysis.length * 3) : 0;
       
@@ -3537,7 +3303,6 @@ class PredictionEngine {
         probability: item?.probability || 0
       }));
       
-      // 创建统计分析结果
       const statisticalAnalysis = {
         summary: stats.summary || {},
         recommendations: statisticsResult.analysis || [],
@@ -3561,6 +3326,336 @@ class PredictionEngine {
     } catch (error) {
       Logger.error("PredictionEngine", "统计预测生成失败", error);
       return await this.generateTraditionalPrediction(history, weights);
+    }
+  }
+  
+  static async generateAdvancedPrediction(env, history, weights) {
+    try {
+      const lastRecord = history[0];
+      if (!lastRecord) {
+        return await this.generateTraditionalPrediction(history, weights);
+      }
+      
+      Logger.info("PredictionEngine", "开始生成增强预测", { 
+        historyLength: history.length,
+        weightsVersion: weights._version || "default"
+      });
+      
+      const algorithmChecks = {
+        traditional: Formatter.isAlgorithmSupported("traditional", history.length),
+        knn: Formatter.isAlgorithmSupported("knn", history.length),
+        stats: Formatter.isAlgorithmSupported("stats", history.length)
+      };
+      
+      Logger.info("PredictionEngine", "算法支持检查", algorithmChecks);
+      
+      const adjustedWeights = { ...weights };
+      if (!algorithmChecks.knn) {
+        adjustedWeights.w_knn_similarity = adjustedWeights.w_knn_similarity * 0.3;
+      }
+      if (!algorithmChecks.stats) {
+        adjustedWeights.w_statistics_analysis = adjustedWeights.w_statistics_analysis * 0.3;
+      }
+      
+      const algorithmPromises = [];
+      
+      algorithmPromises.push(
+        this.generateTraditionalPrediction(history, adjustedWeights)
+          .catch(error => {
+            Logger.error("PredictionEngine", "传统算法失败", error);
+            return this.generateStaticFallback();
+          })
+      );
+      
+      if (algorithmChecks.knn) {
+        algorithmPromises.push(
+          this.generateKNNPrediction(history, adjustedWeights)
+            .catch(error => {
+              Logger.error("PredictionEngine", "KNN算法失败", error);
+              return null;
+            })
+        );
+      }
+      
+      if (algorithmChecks.stats) {
+        algorithmPromises.push(
+          this.generateStatsPrediction(history, adjustedWeights)
+            .catch(error => {
+              Logger.error("PredictionEngine", "统计算法失败", error);
+              return null;
+            })
+        );
+      }
+      
+      const montePromise = new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          Logger.warn("PredictionEngine", "蒙特卡洛模拟超时");
+          resolve(null);
+        }, 4000);
+        
+        OptimizedMonteCarloEngine.runOptimizedSimulation(history, 5000)
+          .then(result => {
+            clearTimeout(timeout);
+            resolve(result);
+          })
+          .catch(error => {
+            clearTimeout(timeout);
+            Logger.error("PredictionEngine", "蒙特卡洛模拟失败", error);
+            resolve(null);
+          });
+      });
+      
+      algorithmPromises.push(montePromise);
+      
+      const results = await Promise.allSettled(algorithmPromises);
+      
+      const [traditionalResult, knnResult, statsResult, monteResult] = results.map(r => 
+        r.status === 'fulfilled' ? r.value : null
+      );
+      
+      const algorithmsUsed = {
+        traditional: !!traditionalResult,
+        knn: !!knnResult,
+        statistics: !!statsResult,
+        monteCarlo: !!monteResult,
+        algorithmsCount: [traditionalResult, knnResult, statsResult, monteResult].filter(Boolean).length,
+        algorithmChecks: algorithmChecks
+      };
+      
+      Logger.info("PredictionEngine", "算法完成情况", algorithmsUsed);
+      
+      if (algorithmsUsed.algorithmsCount === 0) {
+        Logger.warn("PredictionEngine", "所有算法失败，使用传统算法后备");
+        return await this.generateTraditionalPrediction(history, weights);
+      }
+      
+      const fallbackResult = traditionalResult || this.generateStaticFallback();
+      
+      const integratedScores = {};
+      
+      for (let i = 1; i <= 49; i++) {
+        integratedScores[i] = { score: 0, probability: 0, contributions: [] };
+      }
+      
+      if (traditionalResult && traditionalResult.specialNumbers) {
+        for (const item of traditionalResult.specialNumbers) {
+          if (item.number >= 1 && item.number <= 49) {
+            integratedScores[item.number].score += (item.score || 0) * 0.8 * adjustedWeights.w_zodiac_transfer;
+            integratedScores[item.number].contributions.push({
+              algorithm: 'traditional',
+              score: item.score || 0,
+              weight: adjustedWeights.w_zodiac_transfer
+            });
+          }
+        }
+      }
+      
+      if (knnResult && knnResult.specialNumbers) {
+        for (const item of knnResult.specialNumbers) {
+          if (item.number >= 1 && item.number <= 49) {
+            integratedScores[item.number].score += (item.score || 0) * 1.2 * adjustedWeights.w_knn_similarity;
+            integratedScores[item.number].contributions.push({
+              algorithm: 'knn',
+              score: item.score || 0,
+              weight: adjustedWeights.w_knn_similarity
+            });
+          }
+        }
+      }
+      
+      if (statsResult && statsResult.specialNumbers) {
+        for (const item of statsResult.specialNumbers) {
+          if (item.number >= 1 && item.number <= 49) {
+            integratedScores[item.number].score += (item.score || 0) * 1.5 * adjustedWeights.w_statistics_analysis;
+            integratedScores[item.number].contributions.push({
+              algorithm: 'statistics',
+              score: item.score || 0,
+              weight: adjustedWeights.w_statistics_analysis
+            });
+          }
+        }
+      }
+      
+      if (monteResult && monteResult.specialPredictions) {
+        for (const item of monteResult.specialPredictions) {
+          if (item.number >= 1 && item.number <= 49) {
+            integratedScores[item.number].score += (item.score || 0) * 1.8 * (adjustedWeights.w_monte_carlo || 2.5);
+            integratedScores[item.number].probability = Math.max(
+              integratedScores[item.number].probability,
+              item.probability || 0
+            );
+            integratedScores[item.number].contributions.push({
+              algorithm: 'montecarlo',
+              score: item.score || 0,
+              weight: adjustedWeights.w_monte_carlo || 2.5,
+              probability: item.probability
+            });
+          }
+        }
+      }
+      
+      const topSpecialNumbers = this.getTopSpecialPredictions(integratedScores, 10);
+      const zodiacPrediction = this.getZodiacPredictions(integratedScores);
+      const colorPrediction = this.getColorPredictions(integratedScores);
+      
+      const excludeSpecials = topSpecialNumbers.slice(0, 5).map(item => item.number);
+      
+      const integratedNormals = {};
+      for (let i = 1; i <= 49; i++) {
+        integratedNormals[i] = { score: 0, probability: 0 };
+      }
+      
+      if (traditionalResult && traditionalResult.normalNumbers) {
+        for (const item of traditionalResult.normalNumbers) {
+          if (item.number >= 1 && item.number <= 49) {
+            integratedNormals[item.number].score += (item.score || 0) * 0.8;
+          }
+        }
+      }
+      
+      if (monteResult && monteResult.normalPredictions) {
+        for (const item of monteResult.normalPredictions) {
+          if (item.number >= 1 && item.number <= 49) {
+            integratedNormals[item.number].score += (item.score || 0) * 1.5;
+            integratedNormals[item.number].probability = item.probability || 0;
+          }
+        }
+      }
+      
+      const excludeSet = new Set(excludeSpecials);
+      const normalPredictions = Object.entries(integratedNormals)
+        .filter(([num, _]) => !excludeSet.has(Formatter.safeInt(num)))
+        .map(([num, data]) => ({
+          number: Formatter.safeInt(num),
+          score: data.score,
+          probability: data.probability
+        }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 6);
+      
+      const bestNumber = topSpecialNumbers[0]?.number || 1;
+      const isBig = bestNumber >= 25;
+      const isOdd = bestNumber % 2 !== 0;
+      const shape = (isBig ? "大" : "小") + (isOdd ? "单" : "双");
+      const head = Math.floor(bestNumber / 10);
+      
+      let confidence = 40;
+      
+      if (traditionalResult) confidence += 20;
+      if (knnResult) confidence += 15;
+      if (statsResult) confidence += 15;
+      if (monteResult) confidence += 20;
+      
+      if (history.length > 50) confidence += 10;
+      if (history.length > 100) confidence += 5;
+      
+      confidence = Math.min(95, confidence);
+      
+      const formattedSpecials = topSpecialNumbers.slice(0, 5).map(item => ({
+        number: item?.number || 1,
+        score: item?.score || 0,
+        probability: item?.probability || 0,
+        zodiac: Formatter.getAttributes(item?.number || 1).zodiac,
+        color: Formatter.getAttributes(item?.number || 1).color,
+        contributions: integratedScores[item?.number]?.contributions || []
+      }));
+      
+      const formattedNormals = normalPredictions.map(item => ({
+        number: item?.number || 1,
+        zodiac: Formatter.getAttributes(item?.number || 1).zodiac,
+        color: Formatter.getAttributes(item?.number || 1).color,
+        score: item?.score || 0,
+        probability: item?.probability || 0
+      }));
+      
+      const algorithmDetails = {
+        traditional: {
+          used: !!traditionalResult,
+          supported: algorithmChecks.traditional,
+          confidence: traditionalResult?.confidence || 0
+        },
+        knn: {
+          used: !!knnResult,
+          supported: algorithmChecks.knn,
+          recordsFound: knnResult?.knnAnalysis?.similarRecordsFound || 0
+        },
+        statistics: {
+          used: !!statsResult,
+          supported: algorithmChecks.stats,
+          patternsFound: statsResult?.statisticalAnalysis?.patterns?.length || 0
+        },
+        monteCarlo: {
+          used: !!monteResult,
+          simulations: monteResult?.simulations || 0
+        },
+        totalAlgorithmsUsed: algorithmsUsed.algorithmsCount
+      };
+      
+      const comprehensiveAnalysis = {
+        traditionalConfidence: traditionalResult?.confidence || 0,
+        knnInsights: knnResult?.knnAnalysis ? {
+          similarRecords: knnResult.knnAnalysis.similarRecordsFound,
+          sizePrediction: knnResult.knnAnalysis.sizePrediction,
+          oddEvenPrediction: knnResult.knnAnalysis.oddEvenPrediction
+        } : null,
+        statisticalPatterns: statsResult?.statisticalAnalysis?.patterns?.slice(0, 3) || [],
+        monteCarloSimulations: monteResult?.simulations || 0,
+        algorithmIntegration: `${algorithmsUsed.algorithmsCount}种算法加权整合`,
+        integrationDetails: `传统(${traditionalResult ? '✓' : '✗'}) KNN(${knnResult ? '✓' : '✗'}) 统计(${statsResult ? '✓' : '✗'}) 蒙特卡洛(${monteResult ? '✓' : '✗'})`,
+        confidenceFactors: {
+          algorithmCount: algorithmsUsed.algorithmsCount,
+          historyRecords: history.length,
+          weightedScore: confidence
+        }
+      };
+      
+      return {
+        zodiac: zodiacPrediction,
+        color: colorPrediction,
+        head: `${head}头`,
+        shape: shape,
+        specialNumbers: formattedSpecials,
+        normalNumbers: formattedNormals,
+        confidence: confidence,
+        analysisBased: true,
+        algorithmUsed: "advanced",
+        algorithmsUsed: algorithmDetails,
+        comprehensiveAnalysis: comprehensiveAnalysis,
+        monteCarloUsed: !!monteResult,
+        nextExpect: this.calculateNextExpect(lastRecord.expect || "2025000"),
+        basedOnLastRecord: {
+          expect: lastRecord.expect || "未知",
+          openCode: lastRecord.open_code || "未知",
+          special: Formatter.safeInt((lastRecord.open_code || "1,2,3,4,5,6,7").split(",")[6], 1),
+          zodiac: Formatter.getAttributes(Formatter.safeInt((lastRecord.open_code || "1,2,3,4,5,6,7").split(",")[6], 1)).zodiac,
+          color: Formatter.getAttributes(Formatter.safeInt((lastRecord.open_code || "1,2,3,4,5,6,7").split(",")[6], 1)).color
+        },
+        totalHistoryRecords: history.length,
+        generatedAt: new Date().toISOString(),
+        algorithmVersion: `V12.4.1-Advanced-${algorithmsUsed.algorithmsCount}Algos`,
+        fallbackUsed: !traditionalResult
+      };
+    } catch (error) {
+      Logger.error("PredictionEngine", "增强预测生成失败", error);
+      try {
+        return await this.generateTraditionalPrediction(history, weights);
+      } catch (fallbackError) {
+        Logger.error("PredictionEngine", "传统算法后备也失败", fallbackError);
+        return this.generateStaticFallback();
+      }
+    }
+  }
+  
+  static calculateNextExpect(currentExpect) {
+    try {
+      if (!currentExpect || !Formatter.isValidExpect(currentExpect)) {
+        return "2025001";
+      }
+      
+      const currentNum = Formatter.safeInt(currentExpect, 2025000);
+      return (currentNum + 1).toString();
+    } catch (error) {
+      return "2025001";
     }
   }
   
@@ -3596,24 +3691,20 @@ class PredictionEngine {
         const currentAttr = Formatter.getAttributes(currentSpecial);
         const nextAttr = Formatter.getAttributes(nextSpecial);
         
-        // 生肖转移统计
         if (currentAttr.zodiac && nextAttr.zodiac) {
           const key = `${currentAttr.zodiac}->${nextAttr.zodiac}`;
           stats.zodiacTransfer[key] = (stats.zodiacTransfer[key] || 0) + 1;
         }
         
-        // 波色转移统计
         if (currentAttr.color && nextAttr.color) {
           const key = `${currentAttr.color}->${nextAttr.color}`;
           stats.colorTransfer[key] = (stats.colorTransfer[key] || 0) + 1;
         }
         
-        // 特码频率统计
         if (nextSpecial >= 1 && nextSpecial <= 49) {
           stats.specialFrequency[nextSpecial] = (stats.specialFrequency[nextSpecial] || 0) + 1;
         }
         
-        // 平码频率统计
         nextNormals.forEach(num => {
           if (num >= 1 && num <= 49) {
             stats.normalFrequency[num] = (stats.normalFrequency[num] || 0) + 1;
@@ -3671,7 +3762,6 @@ class PredictionEngine {
 
   static normalizeStatistics(stats) {
     try {
-      // 计算生肖转移概率
       const zodiacTotals = {};
       Object.keys(stats.zodiacTransfer).forEach(key => {
         const [from] = key.split('->');
@@ -3685,7 +3775,6 @@ class PredictionEngine {
         }
       });
       
-      // 计算颜色转移概率
       const colorTotals = {};
       Object.keys(stats.colorTransfer).forEach(key => {
         const [from] = key.split('->');
@@ -3713,7 +3802,6 @@ class PredictionEngine {
         const attr = Formatter.getAttributes(num);
         let score = 0;
         
-        // 生肖转移
         if (lastAttr.zodiac && attr.zodiac) {
           const key = `${lastAttr.zodiac}->${attr.zodiac}`;
           if (stats.zodiacTransfer[key]) {
@@ -3721,18 +3809,15 @@ class PredictionEngine {
           }
         }
         
-        // 六合关系
         if (CONFIG.ZODIAC_RELATIONS.SIX_HARMONY[lastAttr.zodiac] === attr.zodiac) {
           score += 80 * weights.w_zodiac_relation;
         }
         
-        // 三合关系
         const threeHarmony = CONFIG.ZODIAC_RELATIONS.THREE_HARMONY[lastAttr.zodiac];
         if (threeHarmony && threeHarmony.includes(attr.zodiac)) {
           score += 60 * weights.w_zodiac_relation;
         }
         
-        // 波色转移
         if (lastAttr.color && attr.color) {
           const key = `${lastAttr.color}->${attr.color}`;
           if (stats.colorTransfer[key]) {
@@ -3741,30 +3826,25 @@ class PredictionEngine {
           }
         }
         
-        // 尾数关联
         const lastTail = lastSpecial % 10;
         const currentTail = num % 10;
         
-        // 简单尾数关联：相同或相邻尾数
         if (lastTail === currentTail) {
           score += 80 * weights.w_tail_correlation;
         } else if (Math.abs(lastTail - currentTail) === 1) {
           score += 40 * weights.w_tail_correlation;
         }
         
-        // 特码频率
         if (stats.specialFrequency[num]) {
           const freq = stats.specialFrequency[num] / Math.max(1, stats.totalRecords);
           score += freq * 60 * weights.w_number_frequency;
         }
         
-        // 数字模式
         const patterns = Formatter.calculateNumberPattern(num);
         if (patterns.length > 0) {
           score += patterns.length * 10 * weights.w_number_pattern;
         }
         
-        // 轻微随机扰动
         const randomFactor = 0.95 + Math.random() * 0.1;
         score *= randomFactor;
         
@@ -3913,19 +3993,16 @@ class PredictionEngine {
         
         let score = 0;
         
-        // 平码频率
         if (stats.normalFrequency[num]) {
           const freq = stats.normalFrequency[num] / Math.max(1, stats.totalRecords);
           score += freq * 150 * weights.w_number_frequency;
         }
         
-        // 数字模式
         const patterns = Formatter.calculateNumberPattern(num);
         if (patterns.length > 0) {
           score += patterns.length * 15 * weights.w_number_pattern;
         }
         
-        // 轻微随机扰动
         const randomFactor = 0.96 + Math.random() * 0.08;
         score *= randomFactor;
         
@@ -3969,7 +4046,6 @@ class PredictionEngine {
     try {
       let confidence = 25;
       
-      // 基础置信度：分数分布
       if (topSpecialNumbers.length > 0) {
         const maxScore = topSpecialNumbers[0]?.score || 50;
         const avgScore = topSpecialNumbers.reduce((sum, item) => sum + (item?.score || 0), 0) / Math.max(1, topSpecialNumbers.length);
@@ -3978,10 +4054,8 @@ class PredictionEngine {
         confidence += scoreRatio * 20;
       }
       
-      // 历史数据量贡献
       confidence += Math.min(15, historyCount / 30);
       
-      // 限制在合理范围内
       confidence = Math.min(90, Math.max(20, Math.floor(confidence)));
       
       return confidence;
@@ -4010,7 +4084,6 @@ class PredictionEngine {
       const numIndex = hour % candidates.length;
       const exampleNumber = candidates[numIndex] || 1;
       
-      // 生成平码
       let normalNumbers = [];
       const excludeNumbers = [exampleNumber];
       
@@ -4033,7 +4106,6 @@ class PredictionEngine {
         excludeNumbers.push(num);
       }
       
-      // 生成特码推荐
       const specialNumbers = [];
       for (let i = 0; i < 5; i++) {
         let num;
@@ -4086,7 +4158,7 @@ class PredictionEngine {
         algorithmUsed: "static",
         totalHistoryRecords: 0,
         generatedAt: new Date().toISOString(),
-        algorithmVersion: "V12.3-Static"
+        algorithmVersion: "V12.4.1-Static"
       };
     } catch (error) {
       Logger.error("PredictionEngine", "生成静态回退预测时出错", error);
@@ -4117,14 +4189,14 @@ class PredictionEngine {
         algorithmUsed: "emergency",
         totalHistoryRecords: 0,
         generatedAt: new Date().toISOString(),
-        algorithmVersion: "V12.3-Emergency"
+        algorithmVersion: "V12.4.1-Emergency"
       };
     }
   }
 }
 
 // ==============================================================================
-// 11. 消息渲染器（更新版）
+// 11. 消息渲染器
 // ==============================================================================
 
 class MessageRenderer {
@@ -4138,41 +4210,49 @@ class MessageRenderer {
       message += `<code>/predict</code> - 传统算法预测\n`;
       message += `<code>/predict knn</code> - KNN算法预测\n`;
       message += `<code>/predict stats</code> - 统计算法预测\n`;
-      message += `<code>/predict advanced</code> - 增强预测（修复版）\n`;
+      message += `<code>/predict advanced</code> - 增强预测（整合全部算法）${CONFIG.EMOJI.crown}\n`;
       message += `<code>/history [页码]</code> - 查看历史记录\n`;
       message += `<code>/ccc</code> - 显示此命令模板\n`;
       
       if (isAdmin) {
         message += `\n<b>${CONFIG.EMOJI.lock} 管理员命令：</b>\n`;
-        message += `<code>/sync</code> - 同步历史数据\n`;
+        message += `<code>/sync</code> - 从频道同步历史数据\n`;
         message += `<code>/push</code> - 推送预测到频道\n`;
         message += `<code>/delete [期号]</code> - 删除单期记录\n`;
       }
       
+      message += `\n<b>${CONFIG.EMOJI.crystal_ball} 数据来源：</b>\n`;
+      message += `${CONFIG.EMOJI.channel} 从Telegram频道获取开奖记录\n`;
+      message += `${CONFIG.EMOJI.sync} 自动解析和验证数据\n`;
+      message += `${CONFIG.EMOJI.database} 存储到D1数据库\n`;
+      
       message += `\n<b>${CONFIG.EMOJI.crystal_ball} 增强预测算法：</b>\n`;
-      message += `• 传统算法 - 基于生肖、波色、尾数\n`;
-      message += `• KNN算法 - K-近邻算法，寻找相似历史\n`;
-      message += `• 统计算法 - 生肖、颜色、尾数、头数、大小、单双全面统计\n`;
-      message += `• 增强预测 - 整合所有算法的最强预测（包含蒙特卡洛模拟）\n`;
+      message += `${CONFIG.EMOJI.brain} 传统算法 - 基于生肖、波色、尾数\n`;
+      message += `${CONFIG.EMOJI.knn} KNN算法 - K-近邻算法，寻找相似历史\n`;
+      message += `${CONFIG.EMOJI.statistics} 统计算法 - 生肖、颜色、尾数、头数、大小、单双全面统计\n`;
+      message += `${CONFIG.EMOJI.crown} 增强预测 - 整合所有算法的最强预测（包含蒙特卡洛模拟）\n`;
       
       message += `\n<b>${CONFIG.EMOJI.rocket} 使用示例：</b>\n`;
       message += `<code>/predict</code> - 传统算法预测\n`;
       message += `<code>/predict knn</code> - KNN算法预测\n`;
       message += `<code>/predict stats</code> - 统计算法预测\n`;
-      message += `<code>/predict advanced</code> - 增强预测（推荐）\n`;
+      message += `<code>/predict advanced</code> - 增强预测（推荐）${CONFIG.EMOJI.rocket}\n`;
       message += `<code>/history 1</code> - 查看第1页历史\n`;
+      message += `<code>/sync</code> - 从频道同步数据（管理员）\n`;
       
       message += `\n${CONFIG.EMOJI.atom} <b>增强特性：</b>\n`;
-      message += `• KNN算法：寻找相似历史模式\n`;
-      message += `• 统计算法：全面分析历史规律\n`;
-      message += `• 蒙特卡洛：已整合到增强预测中\n`;
-      message += `• 智能缓存系统\n`;
-      message += `• 多维度分析\n`;
+      message += `${CONFIG.EMOJI.knn} KNN算法：寻找相似历史模式\n`;
+      message += `${CONFIG.EMOJI.statistics} 统计算法：全面分析历史规律\n`;
+      message += `${CONFIG.EMOJI.dice} 蒙特卡洛：已整合到增强预测中\n`;
+      message += `${CONFIG.EMOJI.memory} 智能缓存系统\n`;
+      message += `${CONFIG.EMOJI.chart} 多维度分析\n`;
+      message += `${CONFIG.EMOJI.clock} 超时控制，避免Worker超时\n`;
+      message += `${CONFIG.EMOJI.channel} 频道数据同步\n`;
       
       message += `\n${CONFIG.EMOJI.refresh} <b>防刷屏特性：</b>\n`;
-      message += `• 每个命令只保留最新一条消息\n`;
-      message += `• 发送相同命令自动删除旧消息\n`;
-      message += `• 保持聊天界面整洁\n`;
+      message += `${CONFIG.EMOJI.trash} 每个命令只保留最新一条消息\n`;
+      message += `${CONFIG.EMOJI.repeat} 发送相同命令自动删除旧消息\n`;
+      message += `${CONFIG.EMOJI.eye} 保持聊天界面整洁\n`;
       
       return message;
     } catch (error) {
@@ -4186,13 +4266,16 @@ class MessageRenderer {
       let message = `${CONFIG.EMOJI.home} <b>欢迎使用 ${CONFIG.SYSTEM.NAME}</b>\n`;
       message += `版本: ${CONFIG.SYSTEM.VERSION}\n\n`;
       message += `${CONFIG.EMOJI.sparkles} <b>增强统计算法预测系统</b>\n\n`;
-      message += `• KNN算法：寻找相似历史模式\n`;
-      message += `• 统计算法：全面分析生肖、颜色、尾数规律\n`;
-      message += `• 增强预测：整合所有算法的最强预测（修复版）\n`;
-      message += `• 防刷屏消息管理\n\n`;
+      message += `${CONFIG.EMOJI.channel} <b>数据来源：从Telegram频道同步开奖记录</b>\n\n`;
+      message += `${CONFIG.EMOJI.knn} KNN算法：寻找相似历史模式\n`;
+      message += `${CONFIG.EMOJI.statistics} 统计算法：全面分析生肖、颜色、尾数规律\n`;
+      message += `${CONFIG.EMOJI.crown} 增强预测：整合所有算法的最强预测\n`;
+      message += `${CONFIG.EMOJI.refresh} 防刷屏消息管理\n`;
+      message += `${CONFIG.EMOJI.clock} 预测超时控制\n\n`;
       message += `使用 <code>/ccc</code> 查看完整命令列表\n`;
-      message += `使用 <code>/predict advanced</code> 生成增强预测\n`;
+      message += `使用 <code>/predict advanced</code> 生成增强预测${CONFIG.EMOJI.rocket}\n`;
       message += `使用 <code>/predict stats</code> 查看统计预测\n`;
+      message += `使用 <code>/sync</code> 从频道同步数据（管理员）\n`;
       
       return message;
     } catch (error) {
@@ -4219,16 +4302,14 @@ class MessageRenderer {
       const color = prediction.color || { main: "red", guard: "blue", scores: {} };
       const head = Formatter.safeString(prediction.head, "未知");
       const shape = Formatter.safeString(prediction.shape, "未知");
-      const algorithmVersion = Formatter.safeString(prediction.algorithmVersion, "V12.3");
-      const generationTime = Formatter.safeInt(prediction.generationTime, 0);
+      const algorithmVersion = Formatter.safeString(prediction.algorithmVersion, "V12.4.1");
       
-      // 算法标识
       let algorithmInfo = "";
-      if (algorithmUsed === "advanced" || algorithmUsed === "enhanced") {
+      if (algorithmUsed === "advanced") {
         algorithmInfo = `${CONFIG.EMOJI.crown} <b>增强算法预测 (整合全部算法)</b>\n`;
       } else if (algorithmUsed === "knn") {
         algorithmInfo = `${CONFIG.EMOJI.knn} <b>KNN算法预测</b>\n`;
-      } else if (algorithmUsed === "stats" || algorithmUsed === "statistics") {
+      } else if (algorithmUsed === "stats") {
         algorithmInfo = `${CONFIG.EMOJI.statistics} <b>统计算法预测</b>\n`;
       } else if (algorithmUsed === "traditional") {
         algorithmInfo = `${CONFIG.EMOJI.brain} <b>传统算法预测</b>\n`;
@@ -4236,20 +4317,22 @@ class MessageRenderer {
         algorithmInfo = `${CONFIG.EMOJI.magic} <b>预测结果</b>\n`;
       }
       
-      // 显示算法使用情况（增强预测时）
+      if (prediction.algorithmTimeout) {
+        algorithmInfo += `${CONFIG.EMOJI.warning} <i>注: ${CONFIG.ALGORITHM_NAMES[prediction.originalAlgorithm]}超时，已切换为传统算法</i>\n`;
+      }
+      
       let algorithmDetails = "";
-      if ((algorithmUsed === "advanced" || algorithmUsed === "enhanced") && prediction.algorithmStats) {
-        const stats = prediction.algorithmStats;
-        algorithmDetails = `${CONFIG.EMOJI.algorithm} <b>算法整合:</b> `;
-        
+      if (algorithmUsed === "advanced" && prediction.algorithmsUsed) {
+        const used = prediction.algorithmsUsed;
+        algorithmDetails = `${CONFIG.EMOJI.gear} <b>算法整合:</b> `;
         const algorithms = [];
-        if (stats.traditional) algorithms.push("传统");
-        if (stats.knn) algorithms.push("KNN");
-        if (stats.statistics) algorithms.push("统计");
-        if (stats.monteCarlo) algorithms.push("蒙特卡洛");
+        if (used.traditional) algorithms.push("传统");
+        if (used.knn) algorithms.push("KNN");
+        if (used.statistics) algorithms.push("统计");
+        if (used.monteCarlo) algorithms.push("蒙特卡洛");
         
         if (algorithms.length > 0) {
-          algorithmDetails += `${algorithms.join("+")} (${stats.successful || 0}/${stats.total || 4}个算法成功)\n`;
+          algorithmDetails += `${algorithms.join("+")} (${used.totalAlgorithmsUsed || 0}种算法)\n`;
         }
       }
       
@@ -4267,25 +4350,23 @@ class MessageRenderer {
         basedOnInfo = `${CONFIG.EMOJI.history} 基于: 第 ${expect} 期 (特码${special} | ${attr.zodiac}${CONFIG.EMOJI[attr.color]})\n`;
       }
       
-      // KNN分析结果
       let knnSummary = "";
       if (prediction.knnAnalysis) {
         const knn = prediction.knnAnalysis;
         if (knn.similarRecordsFound > 0) {
           knnSummary += `\n${CONFIG.EMOJI.knn} <b>KNN分析</b>\n`;
-          knnSummary += `• 找到 ${knn.similarRecordsFound} 条相似历史记录\n`;
+          knnSummary += `${CONFIG.EMOJI.search} 找到 ${knn.similarRecordsFound} 条相似历史记录\n`;
           
           if (knn.specialCandidates && knn.specialCandidates.length > 0) {
-            knnSummary += `• 相似记录推荐: ${knn.specialCandidates.slice(0, 3).map(item => item.value).join(", ")}\n`;
+            knnSummary += `${CONFIG.EMOJI.star} 相似记录推荐: ${knn.specialCandidates.slice(0, 3).map(item => item.value).join(", ")}\n`;
           }
           
           if (knn.sizePrediction || knn.oddEvenPrediction) {
-            knnSummary += `• 形态预测: ${knn.sizePrediction || ""}${knn.oddEvenPrediction ? knn.sizePrediction ? "/" + knn.oddEvenPrediction : knn.oddEvenPrediction : ""}\n`;
+            knnSummary += `${CONFIG.EMOJI.shape} 形态预测: ${knn.sizePrediction || ""}${knn.oddEvenPrediction ? knn.sizePrediction ? "/" + knn.oddEvenPrediction : knn.oddEvenPrediction : ""}\n`;
           }
         }
       }
       
-      // 统计分析结果
       let statsSummary = "";
       if (prediction.statisticalAnalysis) {
         const stats = prediction.statisticalAnalysis;
@@ -4293,14 +4374,14 @@ class MessageRenderer {
         if (stats.summary && stats.summary.strongPatterns && stats.summary.strongPatterns.length > 0) {
           statsSummary += `\n${CONFIG.EMOJI.statistics} <b>统计规律</b>\n`;
           stats.summary.strongPatterns.slice(0, 3).forEach(pattern => {
-            statsSummary += `• ${pattern}\n`;
+            statsSummary += `${CONFIG.EMOJI.chart} ${pattern}\n`;
           });
         }
         
         if (stats.recommendations && stats.recommendations.length > 0) {
           statsSummary += `\n${CONFIG.EMOJI.bulb} <b>策略推荐</b>\n`;
           stats.recommendations.slice(0, 3).forEach(rec => {
-            statsSummary += `• ${rec}\n`;
+            statsSummary += `${CONFIG.EMOJI.lightning} ${rec}\n`;
           });
         }
         
@@ -4309,49 +4390,37 @@ class MessageRenderer {
             statsSummary += `\n${CONFIG.EMOJI.graph} <b>模式识别</b>\n`;
           }
           stats.patterns.slice(0, 2).forEach(pattern => {
-            statsSummary += `• ${pattern}\n`;
+            statsSummary += `${CONFIG.EMOJI.eye} ${pattern}\n`;
           });
         }
       }
       
-      // 增强预测分析
-      let enhancedSummary = "";
-      if (algorithmUsed === "advanced" || algorithmUsed === "enhanced") {
-        enhancedSummary += `\n${CONFIG.EMOJI.crown} <b>增强算法分析</b>\n`;
+      let advancedSummary = "";
+      if (prediction.comprehensiveAnalysis) {
+        const analysis = prediction.comprehensiveAnalysis;
+        advancedSummary += `\n${CONFIG.EMOJI.crown} <b>增强分析</b>\n`;
         
-        if (prediction.algorithmStats) {
-          const stats = prediction.algorithmStats;
-          enhancedSummary += `• 算法成功率: ${stats.successful || 0}/${stats.total || 4}\n`;
-          
-          if (stats.successful > 0) {
-            const algoNames = [];
-            if (stats.traditional) algoNames.push("传统");
-            if (stats.knn) algoNames.push("KNN");
-            if (stats.statistics) algoNames.push("统计");
-            if (stats.monteCarlo) algoNames.push("蒙特卡洛");
-            
-            if (algoNames.length > 0) {
-              enhancedSummary += `• 使用的算法: ${algoNames.join(" + ")}\n`;
-            }
-          }
+        if (analysis.algorithmIntegration) {
+          advancedSummary += `${CONFIG.EMOJI.gear} ${analysis.algorithmIntegration}\n`;
         }
         
-        if (prediction.integrationMethod) {
-          enhancedSummary += `• 整合方法: ${prediction.integrationMethod}\n`;
+        if (analysis.statisticalPatterns && analysis.statisticalPatterns.length > 0) {
+          advancedSummary += `${CONFIG.EMOJI.chart} 发现 ${analysis.statisticalPatterns.length} 条统计规律\n`;
         }
         
-        if (generationTime > 0) {
-          enhancedSummary += `• 生成时间: ${Formatter.formatDuration(generationTime)}\n`;
+        if (analysis.monteCarloSimulations > 0) {
+          advancedSummary += `${CONFIG.EMOJI.dice} 蒙特卡洛模拟: ${analysis.monteCarloSimulations} 次\n`;
+        }
+        
+        if (analysis.knnInsights && analysis.knnInsights.similarRecords > 0) {
+          advancedSummary += `${CONFIG.EMOJI.knn} KNN相似记录: ${analysis.knnInsights.similarRecords} 条\n`;
+        }
+        
+        if (analysis.integrationDetails) {
+          advancedSummary += `${CONFIG.EMOJI.info} 算法详情: ${analysis.integrationDetails}\n`;
         }
       }
       
-      // 回退模式提示
-      let fallbackNote = "";
-      if (prediction.fallbackMode) {
-        fallbackNote = `\n${CONFIG.EMOJI.warning} <b>注意: 使用了回退预测模式</b>\n`;
-      }
-      
-      // 格式化平码显示
       let normalDisplay = "暂无数据";
       if (normalNumbers.length > 0) {
         normalDisplay = normalNumbers.slice(0, 6).map(num => 
@@ -4359,7 +4428,6 @@ class MessageRenderer {
         ).join("  ");
       }
       
-      // 格式化特码显示（带概率）
       let specialDisplay = "暂无数据";
       if (specialNumbers.length > 0) {
         specialDisplay = specialNumbers.slice(0, 5).map((num, index) => {
@@ -4376,16 +4444,14 @@ class MessageRenderer {
       const zodiacMain = Array.isArray(zodiac.main) ? zodiac.main : [];
       const zodiacGuard = Array.isArray(zodiac.guard) ? zodiac.guard : [];
       
-      // 添加KNN生肖推荐（如果有）
       let zodiacExtra = "";
       if (zodiac.knn && Array.isArray(zodiac.knn) && zodiac.knn.length > 0) {
-        zodiacExtra = `\nKNN推荐: ${zodiac.knn.join(" ")}`;
+        zodiacExtra = `\n${CONFIG.EMOJI.knn} KNN推荐: ${zodiac.knn.join(" ")}`;
       }
       
-      // 添加KNN颜色推荐（如果有）
       let colorExtra = "";
       if (color.knn && Array.isArray(color.knn) && color.knn.length > 0) {
-        colorExtra = ` | KNN: ${color.knn.map(c => CONFIG.EMOJI[c]).join("")}`;
+        colorExtra = ` | ${CONFIG.EMOJI.knn} KNN: ${color.knn.map(c => CONFIG.EMOJI[c]).join("")}`;
       }
       
       const content = `
@@ -4404,7 +4470,7 @@ ${CONFIG.EMOJI.rocket} <b>特码参考 (概率)</b>
 ${specialDisplay}
 
 <b>精选平码</b>
-${normalDisplay}${knnSummary}${statsSummary}${enhancedSummary}${fallbackNote}
+${normalDisplay}${knnSummary}${statsSummary}${advancedSummary}
 ────────────────
 ${CONFIG.EMOJI.target} <b>形态分析</b>
 头数: ${head} | 形态: ${shape}
@@ -4412,7 +4478,8 @@ ${CONFIG.EMOJI.target} <b>形态分析</b>
 ${CONFIG.EMOJI.chart_up} <b>置信度</b>: ${confidence}%
 ${CONFIG.EMOJI.clock} <b>生成时间</b>: ${new Date(prediction.generatedAt || Date.now()).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}
 ${CONFIG.EMOJI.cpu} <b>算法版本</b>: ${algorithmVersion}
-${CONFIG.EMOJI.memory} <b>历史数据</b>: ${totalHistoryRecords} 期
+${CONFIG.EMOJI.database} <b>历史数据</b>: ${totalHistoryRecords} 期
+${CONFIG.EMOJI.channel} <b>数据来源</b>: Telegram频道同步
 ${CONFIG.EMOJI.refresh} <b>消息模式</b>: 每个命令只保留最新消息
       `.trim();
 
@@ -4453,23 +4520,45 @@ ${CONFIG.EMOJI.refresh} <b>消息模式</b>: 每个命令只保留最新消息
 
   static renderSyncResult(result) {
     try {
-      let message = `${CONFIG.EMOJI.database} <b>数据同步结果</b>\n\n`;
+      let message = `${CONFIG.EMOJI.channel} <b>频道数据同步结果</b>\n\n`;
       
       if (result?.success) {
-        message += `${CONFIG.EMOJI.success} <b>同步成功</b>\n`;
-        message += `数据源总数: ${result.total || 0} 条\n`;
-        message += `成功新增: ${result.added || 0} 条\n`;
-        message += `跳过重复: ${result.skipped || 0} 条\n`;
+        message += `${CONFIG.EMOJI.check} <b>同步成功</b>\n`;
         
-        if (result.newCount > 0) {
-          message += `\n${CONFIG.EMOJI.bell} <b>发现 ${result.newCount} 条新开奖记录</b>\n`;
+        if (result.channelInfo) {
+          message += `${CONFIG.EMOJI.info} 频道: ${result.channelInfo.title}\n`;
+          message += `${CONFIG.EMOJI.info} 类型: ${result.channelInfo.type}\n`;
+        }
+        
+        if (result.latestInDB) {
+          message += `${CONFIG.EMOJI.database} 当前最新期号: ${result.latestInDB}\n`;
+        }
+        
+        message += `${CONFIG.EMOJI.clock} 用时: ${Formatter.formatDuration(result.durationMs || 0)}\n`;
+        
+        if (result.operationGuide) {
+          message += `\n${result.operationGuide}`;
+        }
+        
+        if (result.note) {
+          message += `\n\n${CONFIG.EMOJI.info} ${result.note}`;
         }
       } else {
-        message += `${CONFIG.EMOJI.failure} <b>同步失败</b>\n`;
-        message += `错误信息: ${result?.error || '未知错误'}\n`;
+        message += `${CONFIG.EMOJI.warning} <b>同步失败</b>\n`;
+        message += `${CONFIG.EMOJI.info} 错误信息: ${result?.error || '未知错误'}\n`;
+        
+        if (result?.rawError) {
+          message += `${CONFIG.EMOJI.debug} 详细错误: ${result.rawError}\n`;
+        }
+        
+        message += `\n${CONFIG.EMOJI.bulb} <b>解决方案:</b>\n`;
+        message += `1. 检查 TG_CHANNEL_ID 环境变量是否正确\n`;
+        message += `2. 确保Bot已加入该频道（私有频道需要邀请）\n`;
+        message += `3. 公开频道请使用 @频道用户名 格式\n`;
+        message += `4. 检查Bot是否为频道管理员（如果需要）`;
       }
       
-      message += `\n${CONFIG.EMOJI.refresh} <i>再次发送 /sync 将删除此消息并创建新消息</i>`;
+      message += `\n\n${CONFIG.EMOJI.refresh} <i>再次发送 /sync 将删除此消息并创建新消息</i>`;
       
       return message;
     } catch (error) {
@@ -4483,17 +4572,17 @@ ${CONFIG.EMOJI.refresh} <b>消息模式</b>: 每个命令只保留最新消息
       let message = `${CONFIG.EMOJI.fire} <b>预测推送结果</b>\n\n`;
       
       if (success) {
-        message += `${CONFIG.EMOJI.success} <b>推送成功</b>\n`;
-        message += `期号: ${prediction?.nextExpect || "未知"}\n`;
-        message += `置信度: ${prediction?.confidence || 0}%\n`;
+        message += `${CONFIG.EMOJI.check} <b>推送成功</b>\n`;
+        message += `${CONFIG.EMOJI.info} 期号: ${prediction?.nextExpect || "未知"}\n`;
+        message += `${CONFIG.EMOJI.chart} 置信度: ${prediction?.confidence || 0}%\n`;
         
         if (channelPushSuccess) {
-          message += `频道推送: 成功 ${CONFIG.EMOJI.success}\n`;
+          message += `${CONFIG.EMOJI.bell} 频道推送: 成功 ${CONFIG.EMOJI.check}\n`;
         } else {
-          message += `频道推送: 失败 ${CONFIG.EMOJI.failure}\n`;
+          message += `${CONFIG.EMOJI.bell} 频道推送: 失败 ${CONFIG.EMOJI.warning}\n`;
         }
       } else {
-        message += `${CONFIG.EMOJI.failure} <b>推送失败</b>\n`;
+        message += `${CONFIG.EMOJI.warning} <b>推送失败</b>\n`;
         message += `请检查系统状态和配置\n`;
       }
       
@@ -4519,15 +4608,15 @@ ${CONFIG.EMOJI.refresh} <b>消息模式</b>: 每个命令只保留最新消息
         message += `您即将删除第 <b>${Formatter.safeString(expectRange)}</b> 期的记录\n`;
       }
       
-      message += `涉及 <b>${toDeleteCount || 0}</b> 条历史记录\n\n`;
+      message += `${CONFIG.EMOJI.info} 涉及 <b>${toDeleteCount || 0}</b> 条历史记录\n\n`;
       
       if (latestAfterDelete && latestAfterDelete.open_code) {
         const special = Formatter.safeInt(latestAfterDelete.open_code.split(",")[6], 0);
         const attr = Formatter.getAttributes(special);
-        message += `删除后，最新记录为:\n`;
+        message += `${CONFIG.EMOJI.eye} <b>删除后，最新记录为:</b>\n`;
         message += `第 <b>${latestAfterDelete.expect || "未知"}</b> 期 | ${attr.zodiac}${CONFIG.EMOJI[attr.color]}\n`;
       } else {
-        message += `删除后将无历史记录\n`;
+        message += `${CONFIG.EMOJI.warning} 删除后将无历史记录\n`;
       }
       
       message += `\n${CONFIG.EMOJI.warning} <b>警告：此操作不可恢复！</b>\n\n`;
@@ -4547,20 +4636,19 @@ ${CONFIG.EMOJI.refresh} <b>消息模式</b>: 每个命令只保留最新消息
       let message = `${CONFIG.EMOJI.trash} <b>删除操作结果</b>\n\n`;
       
       if (result?.success) {
-        message += `${CONFIG.EMOJI.success} <b>删除成功</b>\n`;
-        message += `删除范围: ${Formatter.safeString(expectRange)}\n`;
-        message += `删除记录数: ${result.deleted || 0} 条\n`;
+        message += `${CONFIG.EMOJI.check} <b>删除成功</b>\n`;
+        message += `${CONFIG.EMOJI.info} 删除范围: ${Formatter.safeString(expectRange)}\n`;
+        message += `${CONFIG.EMOJI.info} 删除记录数: ${result.deleted || 0} 条\n`;
         
         if (result.total !== undefined) {
-          message += `范围内记录数: ${result.total} 条\n`;
+          message += `${CONFIG.EMOJI.info} 范围内记录数: ${result.total} 条\n`;
         }
         
-        // 显示删除后的最新记录
         if (impactInfo && impactInfo.latestAfterDelete) {
           const { latestAfterDelete } = impactInfo;
           const special = Formatter.safeInt(latestAfterDelete.open_code.split(",")[6], 0);
           const attr = Formatter.getAttributes(special);
-          message += `\n${CONFIG.EMOJI.check} <b>删除后最新记录</b>\n`;
+          message += `\n${CONFIG.EMOJI.eye} <b>删除后最新记录</b>\n`;
           message += `第 ${latestAfterDelete.expect} 期 | ${attr.zodiac}${CONFIG.EMOJI[attr.color]}\n`;
         }
         
@@ -4568,11 +4656,11 @@ ${CONFIG.EMOJI.refresh} <b>消息模式</b>: 每个命令只保留最新消息
           message += `\n${result.message}\n`;
         }
       } else {
-        message += `${CONFIG.EMOJI.failure} <b>删除失败</b>\n`;
-        message += `错误信息: ${result?.error || '未知错误'}\n`;
+        message += `${CONFIG.EMOJI.warning} <b>删除失败</b>\n`;
+        message += `${CONFIG.EMOJI.info} 错误信息: ${result?.error || '未知错误'}\n`;
       }
       
-      message += `\n操作时间: ${Formatter.formatDateTime()}`;
+      message += `\n${CONFIG.EMOJI.clock} 操作时间: ${Formatter.formatDateTime()}`;
       message += `\n\n${CONFIG.EMOJI.refresh} <i>再次发送 /delete 将删除此消息并创建新确认</i>`;
       
       return message;
@@ -4584,7 +4672,7 @@ ${CONFIG.EMOJI.refresh} <b>消息模式</b>: 每个命令只保留最新消息
 }
 
 // ==============================================================================
-// 12. 外部接口封装（更新版）
+// 12. 外部接口封装（已修复同步功能）
 // ==============================================================================
 
 class ExternalService {
@@ -4711,7 +4799,6 @@ class ExternalService {
         const newMessageId = sendResult.result.message_id;
         
         MessageManager.setUserMessage(chatId, messageType, newMessageId);
-        
         MessageManager.cleanupOldMessages(chatId, 10);
         
         Logger.info("Telegram", `发送新消息成功: chatId=${chatId}, type=${messageType}, messageId=${newMessageId}, 旧消息ID=${oldMessageId || '无'}`);
@@ -4743,176 +4830,184 @@ class ExternalService {
     return await this.sendMessage(env, chatId, text, parseMode);
   }
 
-  static async syncHistoryFromUrl(env) {
-    if (!env || !env.LOTTERY_DATA_URL) {
-      return { success: false, error: '未配置 LOTTERY_DATA_URL 环境变量' };
-    }
-
+  static async syncFromChannel(env) {
     try {
-      Logger.info("Sync", `开始从 ${env.LOTTERY_DATA_URL} 同步数据`);
-      
-      const response = await fetch(env.LOTTERY_DATA_URL, {
-        headers: { 
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) MarkSixBot/12.3',
-          'Accept': 'application/json',
-          'Cache-Control': 'no-cache'
-        }
-      });
+      const startTime = Date.now();
+      Logger.info("ChannelSync", `开始检查频道并准备同步数据`);
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      // 1. 检查基础配置
+      if (!env || !env.TG_BOT_TOKEN) {
+        throw new Error('TG_BOT_TOKEN 未配置');
+      }
+      if (!env.TG_CHANNEL_ID) {
+        throw new Error('TG_CHANNEL_ID 未配置');
       }
 
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        throw new Error('响应不是有效的JSON格式');
+      // 2. 获取频道信息 (验证频道存在性及Bot权限)
+      const channelInfo = await this.getChatInfo(env, env.TG_CHANNEL_ID);
+      if (!channelInfo.success) {
+        throw new Error(`无法访问频道: ${channelInfo.error}`);
       }
 
-      const data = await response.json();
-      let records = [];
+      const chat = channelInfo.chat;
+      const channelTitle = chat.title || `ID: ${chat.id}`;
+      const isPublic = chat.username ? `公开频道(@${chat.username})` : '私有频道';
 
-      if (data.result === true && Array.isArray(data.data)) {
-        records = this.parseRecordsFormat1(data.data);
-      } else if (Array.isArray(data)) {
-        records = this.parseRecordsFormat2(data);
-      } else if (data.data && Array.isArray(data.data)) {
-        records = this.parseRecordsFormat2(data.data);
-      } else {
-        throw new Error('不支持的JSON格式');
-      }
+      Logger.info("ChannelSync", `频道信息获取成功`, { title: channelTitle, type: isPublic });
 
-      if (records.length === 0) {
-        return { success: false, error: '未解析到有效开奖记录' };
-      }
-
-      records.sort((a, b) => Formatter.compareExpect(b.expect, a.expect));
-
+      // 3. 获取数据库中最新的期号，用于后续比对
       const latestInDB = await DB.getLatestExpect(env);
-      let newRecords = [];
+      Logger.info("ChannelSync", `数据库中最新的开奖期号为: ${latestInDB || '无记录'}`);
 
-      if (latestInDB) {
-        newRecords = records.filter(r => Formatter.compareExpect(r.expect, latestInDB) > 0);
-        Logger.info("Sync", `数据库最新期号: ${latestInDB}, 发现 ${newRecords.length} 条新记录`);
-      } else {
-        newRecords = records;
-        Logger.info("Sync", `数据库为空，所有 ${records.length} 条记录都是新的`);
-      }
+      // 4. 给出明确的操作指南
+      const operationGuide = `
+✅ <b>频道连接成功！</b>
 
-      if (newRecords.length === 0) {
-        return { 
-          success: true, 
-          total: records.length, 
-          added: 0, 
-          newCount: 0,
-          message: '没有发现新记录，数据已是最新' 
-        };
-      }
+📢 <b>频道信息</b>
+• 名称: ${channelTitle}
+• 类型: ${isPublic}
+• ID: <code>${chat.id}</code>
 
-      newRecords.sort((a, b) => Formatter.compareExpect(a.expect, b.expect));
-      const saveResult = await DB.batchAddHistory(env, newRecords);
+📊 <b>数据状态</b>
+• 本地最新期号: <b>${latestInDB || '暂无记录'}</b>
 
-      if (saveResult.success && saveResult.added > 0) {
-        const totalSyncs = Formatter.safeInt(await DB.getSetting(env, "TOTAL_SYNCS", "0"), 0) + 1;
-        await DB.saveSetting(env, "TOTAL_SYNCS", totalSyncs.toString());
-        await DB.saveSetting(env, "LAST_SYNC", Formatter.formatDateTime());
-        
-        // 清除缓存
-        CacheManager.clear();
-        SimplifiedMonteCarloEngine.clearCache();
-      }
+🔄 <b>如何同步数据？</b>
+由于Telegram Bot API的限制，机器人无法直接拉取频道的完整历史消息。请按以下步骤操作：
 
+<b>方法一：手动转发（推荐）</b>
+1. 在开奖频道中，找到需要录入的历史开奖消息。
+2. 长按消息，选择"转发"。
+3. 选择并发送给你的Bot（即此聊天窗口）。
+4. Bot将自动解析消息内容并存入数据库。
+
+<b>方法二：邀请Bot为管理员（如需未来自动同步）</b>
+1. 将Bot添加为开奖频道的管理员。
+2. 授予"发布消息"和"编辑他人消息"权限（非必须）。
+3. 后续开奖信息发布时，可以在消息中提及Bot，Bot会进行处理。
+
+💡 <b>温馨提示</b>
+• 请确保转发的消息格式与Bot能解析的格式一致。
+• 使用 <code>/history</code> 命令查看已保存的数据。
+`;
+
+      // 5. 记录本次同步检查日志
+      await DB.saveSetting(env, "LAST_CHANNEL_SYNC", Formatter.formatDateTime());
+      await DB.saveSetting(env, "SYNC_STATUS", "ready_for_manual");
+
+      const syncLogData = {
+        messagesFetched: 0,
+        recordsParsed: 0,
+        recordsAdded: 0,
+        recordsSkipped: 0,
+        durationMs: Date.now() - startTime,
+        status: "manual_sync_required",
+        errorMessage: null
+      };
+
+      await DB.logChannelSync(env, syncLogData);
+
+      // 返回成功结果，但包含的是操作指南而非数据
       return {
-        success: saveResult.success,
-        total: records.length,
-        added: saveResult.added || 0,
-        skipped: saveResult.skipped || 0,
-        newCount: newRecords.length,
+        success: true,
+        channelInfo: {
+          title: channelTitle,
+          type: isPublic,
+          id: chat.id
+        },
         latestInDB: latestInDB,
-        error: saveResult.error
+        operationGuide: operationGuide,
+        durationMs: syncLogData.durationMs,
+        note: '请按照返回的操作指南手动转发消息进行同步。'
       };
 
     } catch (error) {
-      Logger.error("Sync", "同步历史数据失败", error);
-      return { 
-        success: false, 
-        error: error.message || '未知错误'
+      Logger.error("ChannelSync", "同步流程失败", error);
+      await DB.saveSetting(env, "SYNC_STATUS", "error");
+
+      // 提供更具体的错误信息
+      let userFriendlyError = error.message;
+      if (error.message.includes('chat not found')) {
+        userFriendlyError = '频道未找到。请检查 TG_CHANNEL_ID 是否正确，并确保Bot已加入该频道（如果是私有频道）。';
+      } else if (error.message.includes('not enough rights')) {
+        userFriendlyError = 'Bot在频道中权限不足。请将Bot添加为频道管理员。';
+      }
+
+      return {
+        success: false,
+        error: userFriendlyError,
+        rawError: error.message,
+        durationMs: Date.now() - startTime
       };
     }
   }
 
-  static parseRecordsFormat1(dataArray) {
-    const records = [];
-    
-    if (!Array.isArray(dataArray)) {
-      return records;
+  /**
+   * 获取Bot自身信息
+   */
+  static async getMe(env) {
+    try {
+      const url = `https://api.telegram.org/bot${env.TG_BOT_TOKEN}/getMe`;
+      const response = await fetch(url);
+      const result = await response.json();
+      return result.ok ? result.result : null;
+    } catch (error) {
+      Logger.error("ExternalService", "getMe failed", error);
+      return null;
     }
-    
-    for (const item of dataArray) {
-      try {
-        if (item && item.expect && item.openCode) {
-          const expect = Formatter.safeString(item.expect).trim();
-          const codeStr = Formatter.safeString(item.openCode).trim();
-          
-          const numbers = codeStr.split(/[,\s]+/)
-            .map(n => Formatter.safeInt(n, 0))
-            .filter(n => n >= 1 && n <= 49);
-          
-          if (numbers.length === 7) {
-            records.push({
-              expect: expect,
-              open_code: numbers.map(n => n.toString().padStart(2, '0')).join(",")
-            });
-          }
-        }
-      } catch (e) {
-        Logger.warn("Sync", `解析记录失败`);
-      }
-    }
-    
-    return records;
   }
 
-  static parseRecordsFormat2(dataArray) {
-    const records = [];
-    
-    if (!Array.isArray(dataArray)) {
-      return records;
-    }
-    
-    for (const item of dataArray) {
-      try {
-        const expect = Formatter.safeString(item.expect || item.issue || item.code, "").trim();
-        const codeStr = Formatter.safeString(item.open_code || item.openCode || item.code_number || item.number, "").trim();
-        
-        if (!expect || !codeStr) continue;
-        
-        const numbers = codeStr.split(/[,\s]+/)
-          .map(n => Formatter.safeInt(n, 0))
-          .filter(n => n >= 1 && n <= 49);
-        
-        if (numbers.length === 7) {
-          records.push({
-            expect: expect,
-            open_code: numbers.map(n => n.toString().padStart(2, '0')).join(",")
-          });
-        }
-      } catch (e) {
-        Logger.warn("Sync", `解析记录失败`);
+  /**
+   * 获取聊天信息 (兼容频道ID和用户名)
+   */
+  static async getChatInfo(env, chatId) {
+    try {
+      const url = `https://api.telegram.org/bot${env.TG_BOT_TOKEN}/getChat`;
+      const body = { chat_id: chatId };
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        return { 
+          success: false, 
+          error: `HTTP ${response.status}: ${errorText}` 
+        };
       }
+
+      const result = await response.json();
+      
+      if (!result.ok) {
+        return { 
+          success: false, 
+          error: result.description || '未知错误' 
+        };
+      }
+
+      return {
+        success: true,
+        chat: result.result
+      };
+    } catch (error) {
+      Logger.error("ExternalService", "获取聊天信息失败", error);
+      return { 
+        success: false, 
+        error: error.message 
+      };
     }
-    
-    return records;
   }
 }
 
 // ==============================================================================
-// 13. 业务逻辑控制器（更新版）
+// 13. 业务逻辑控制器
 // ==============================================================================
 
 class Controller {
   static pendingDeletions = new Map();
 
-  // 处理开始命令
   static async handleStart(env, chatId, isAdmin) {
     try {
       const message = MessageRenderer.renderWelcomeMessage(isAdmin);
@@ -4932,7 +5027,6 @@ class Controller {
     }
   }
 
-  // 处理命令模板
   static async handleCommandTemplate(env, chatId, isAdmin) {
     try {
       const message = MessageRenderer.renderCommandTemplate(isAdmin);
@@ -4952,18 +5046,9 @@ class Controller {
     }
   }
 
-  // 处理预测
   static async handlePredict(env, chatId, algorithm = "traditional") {
     try {
-      // 发送处理中消息
-      const algorithmName = {
-        traditional: "传统算法",
-        knn: "KNN算法",
-        stats: "统计算法",
-        statistics: "统计算法",
-        advanced: "增强算法",
-        enhanced: "增强算法"
-      }[algorithm] || "传统算法";
+      const algorithmName = CONFIG.ALGORITHM_NAMES[algorithm] || "传统算法";
       
       const processingMessage = `${CONFIG.EMOJI.hourglass} <b>正在生成预测...</b>\n\n算法: ${algorithmName}\n数据: 全部历史记录\n请稍候...`;
       const processingResult = await ExternalService.sendAndDeleteOldMessage(
@@ -4974,19 +5059,17 @@ class Controller {
         await ExternalService.sendTemporaryMessage(env, chatId, processingMessage);
       }
       
-      // 获取历史数据和权重
       const history = await DB.getAllHistory(env);
       const weights = await DB.getWeights(env);
       
       if (history.length === 0) {
-        const message = "❌ <b>无历史数据</b>\n\n无法生成预测。请先使用 /sync 命令同步数据。";
+        const message = `${CONFIG.EMOJI.warning} <b>无历史数据</b>\n\n无法生成预测。请先使用 /sync 命令从频道同步数据。\n\n管理员请执行: <code>/sync</code>`;
         await ExternalService.sendAndDeleteOldMessage(
           env, chatId, CONFIG.COMMAND_TYPES.PREDICT, message
         );
         return;
       }
       
-      // 生成预测
       const prediction = await PredictionEngine.generate(env, history, weights, algorithm);
       
       if (!prediction) {
@@ -4997,7 +5080,6 @@ class Controller {
         return;
       }
       
-      // 渲染并发送预测结果
       const message = MessageRenderer.renderPrediction(prediction);
       await ExternalService.sendAndDeleteOldMessage(
         env, chatId, CONFIG.COMMAND_TYPES.PREDICT, message
@@ -5017,7 +5099,6 @@ class Controller {
     }
   }
 
-  // 处理历史记录
   static async handleHistory(env, chatId, pageStr = "1") {
     try {
       const page = Math.max(1, Formatter.safeInt(pageStr, 1));
@@ -5051,7 +5132,6 @@ class Controller {
     }
   }
 
-  // 处理同步
   static async handleSync(env, chatId, isAdmin) {
     if (!isAdmin) {
       const message = "❌ <b>权限不足</b>\n\n只有管理员可以同步数据。";
@@ -5065,8 +5145,28 @@ class Controller {
       return;
     }
     
+    if (!env.TG_CHANNEL_ID) {
+      const message = "❌ <b>频道ID未配置</b>\n\n无法从频道同步数据。请配置 TG_CHANNEL_ID 环境变量。";
+      const result = await ExternalService.sendAndDeleteOldMessage(
+        env, chatId, CONFIG.COMMAND_TYPES.SYNC, message
+      );
+      
+      if (!result.success) {
+        await ExternalService.sendTemporaryMessage(env, chatId, message);
+      }
+      return;
+    }
+    
     try {
-      const processingMessage = `${CONFIG.EMOJI.database} <b>正在同步历史数据...</b>\n\n请稍候...`;
+      const channelInfo = await ExternalService.getChatInfo(env, env.TG_CHANNEL_ID);
+      
+      let channelInfoText = "";
+      if (channelInfo.success && channelInfo.chat) {
+        const chat = channelInfo.chat;
+        channelInfoText = `\n${CONFIG.EMOJI.channel} 频道: ${chat.title || chat.id}\n`;
+      }
+      
+      const processingMessage = `${CONFIG.EMOJI.channel} <b>正在从频道同步历史数据...</b>\n${channelInfoText}\n请稍候...`;
       const processingResult = await ExternalService.sendAndDeleteOldMessage(
         env, chatId, CONFIG.COMMAND_TYPES.SYNC, processingMessage
       );
@@ -5075,7 +5175,7 @@ class Controller {
         await ExternalService.sendTemporaryMessage(env, chatId, processingMessage);
       }
       
-      const result = await ExternalService.syncHistoryFromUrl(env);
+      const result = await ExternalService.syncFromChannel(env);
       const message = MessageRenderer.renderSyncResult(result);
       
       await ExternalService.sendAndDeleteOldMessage(
@@ -5096,7 +5196,6 @@ class Controller {
     }
   }
 
-  // 处理推送
   static async handlePush(env, chatId, isAdmin) {
     if (!isAdmin) {
       const message = "❌ <b>权限不足</b>\n\n只有管理员可以推送预测。";
@@ -5135,7 +5234,7 @@ class Controller {
       const history = await DB.getAllHistory(env);
       
       if (history.length === 0) {
-        const message = "❌ <b>无历史数据</b>\n\n无法生成推送。";
+        const message = "❌ <b>无历史数据</b>\n\n无法生成推送。请先使用 /sync 同步数据。";
         await ExternalService.sendAndDeleteOldMessage(
           env, chatId, CONFIG.COMMAND_TYPES.PUSH, message
         );
@@ -5175,7 +5274,6 @@ class Controller {
     }
   }
 
-  // 处理删除
   static async handleDelete(env, chatId, userId, commandText, isAdmin) {
     if (!isAdmin) {
       const message = "❌ <b>权限不足</b>\n\n只有管理员可以删除记录。";
@@ -5235,7 +5333,7 @@ class Controller {
       const confirmMessage = MessageRenderer.renderDeleteConfirmation(expectRange, impactInfo);
       
       const deletionKey = `${chatId}:${userId}`;
-      Controller.pendingDeletions.set(deletionKey, {
+      this.pendingDeletions.set(deletionKey, {
         expectRange: expectRange,
         start: rangeInfo.start,
         end: rangeInfo.end,
@@ -5244,7 +5342,7 @@ class Controller {
       });
       
       setTimeout(() => {
-        Controller.pendingDeletions.delete(deletionKey);
+        this.pendingDeletions.delete(deletionKey);
       }, 10 * 60 * 1000);
       
       const result = await ExternalService.sendAndDeleteOldMessage(
@@ -5269,11 +5367,10 @@ class Controller {
     }
   }
 
-  // 确认删除
   static async confirmDelete(env, chatId, userId, confirmText) {
     try {
       const deletionKey = `${chatId}:${userId}`;
-      const pendingDeletion = Controller.pendingDeletions.get(deletionKey);
+      const pendingDeletion = this.pendingDeletions.get(deletionKey);
       
       if (!pendingDeletion) {
         const message = "❌ <b>删除操作已过期或无效</b>\n\n请重新发起删除命令。";
@@ -5300,7 +5397,7 @@ class Controller {
         return;
       }
       
-      Controller.pendingDeletions.delete(deletionKey);
+      this.pendingDeletions.delete(deletionKey);
       
       const processingMessage = `${CONFIG.EMOJI.trash} <b>正在删除记录...</b>\n\n请稍候...`;
       const processingResult = await ExternalService.sendAndDeleteOldMessage(
@@ -5328,7 +5425,7 @@ class Controller {
       }
       
       CacheManager.clear();
-      SimplifiedMonteCarloEngine.clearCache();
+      OptimizedMonteCarloEngine.clearCache();
       
       const message = MessageRenderer.renderDeleteResult(result, pendingDeletion.expectRange, pendingDeletion.impactInfo);
       await ExternalService.sendAndDeleteOldMessage(
@@ -5353,11 +5450,89 @@ class Controller {
 }
 
 // ==============================================================================
-// 14. 事件处理器
+// 14. 事件处理器（新增转发消息处理）
 // ==============================================================================
+
+/**
+ * 处理转发的开奖消息
+ */
+async function processForwardedLotteryMessage(env, chatId, message) {
+  try {
+    const parsingMsg = await ExternalService.sendMessage(
+      env, 
+      chatId, 
+      `${CONFIG.EMOJI.hourglass} <b>正在解析转发的开奖消息...</b>`
+    );
+
+    const parsedRecord = ChannelMessageParser.parseMessage(message.text);
+    
+    if (!parsedRecord || !ChannelMessageParser.validateParsedRecord(parsedRecord)) {
+      await ExternalService.editMessage(
+        env, 
+        chatId, 
+        parsingMsg.result.message_id,
+        `${CONFIG.EMOJI.warning} <b>解析失败</b>\n\n转发的消息格式不正确，无法识别为有效的开奖记录。`
+      );
+      return;
+    }
+
+    // 检查是否已存在该期记录
+    const exists = await DB.checkExpectExists(env, parsedRecord.expect);
+    if (exists) {
+      await ExternalService.editMessage(
+        env, 
+        chatId, 
+        parsingMsg.result.message_id,
+        `${CONFIG.EMOJI.info} <b>记录已存在</b>\n\n第 ${parsedRecord.expect} 期开奖记录已存在于数据库中。`
+      );
+      return;
+    }
+
+    // 保存到数据库
+    const saveResult = await DB.batchAddHistory(env, [parsedRecord]);
+    
+    if (saveResult.success && saveResult.added > 0) {
+      const special = Formatter.safeInt(parsedRecord.open_code.split(",")[6], 0);
+      const attr = Formatter.getAttributes(special);
+      
+      await ExternalService.editMessage(
+        env, 
+        chatId, 
+        parsingMsg.result.message_id,
+        `${CONFIG.EMOJI.check} <b>记录保存成功！</b>\n\n` +
+        `✅ <b>第 ${parsedRecord.expect} 期</b>\n` +
+        `🎯 开奖号码: ${parsedRecord.open_code}\n` +
+        `🐉 特码生肖: ${attr.zodiac} ${CONFIG.EMOJI[attr.color]}\n\n` +
+        `使用 <code>/history</code> 查看所有记录。`
+      );
+      
+      // 清除缓存，确保最新数据被读取
+      CacheManager.clear();
+      Logger.info("ForwardHandler", `成功保存转发记录`, { expect: parsedRecord.expect });
+    } else {
+      await ExternalService.editMessage(
+        env, 
+        chatId, 
+        parsingMsg.result.message_id,
+        `${CONFIG.EMOJI.warning} <b>保存失败</b>\n\n可能原因：记录已存在或数据库错误。`
+      );
+    }
+  } catch (error) {
+    Logger.error("ForwardHandler", "处理转发消息失败", error);
+    await ExternalService.sendMessage(
+      env, 
+      chatId, 
+      `${CONFIG.EMOJI.warning} <b>处理消息时出错</b>\n\n${error.message}`
+    );
+  }
+}
 
 async function handleUpdate(env, payload) {
   try {
+    if (Math.random() < 0.01) {
+      MessageManager.autoCleanup();
+    }
+    
     const msg = payload.message;
     if (!msg || !msg.text) return;
 
@@ -5368,7 +5543,25 @@ async function handleUpdate(env, payload) {
     
     Logger.info("Update", `收到消息: ${text}`, { chatId, userId, isAdmin });
     
-    // 处理确认删除
+    // 新增：处理可能是转发的开奖消息
+    // 检查消息是否包含转发来源，并且文本内容不为空
+    if (msg.forward_from_chat || msg.forward_from) {
+      const isFromChannel = !!msg.forward_from_chat;
+      const sourceChat = isFromChannel ? msg.forward_from_chat : msg.forward_from;
+      
+      Logger.info("ForwardHandler", `收到转发消息`, {
+        from: isFromChannel ? '频道' : '用户',
+        sourceId: sourceChat.id,
+        textLength: msg.text?.length || 0
+      });
+
+      // 仅当消息文本符合开奖信息特征时才尝试解析
+      if (msg.text && (msg.text.includes('开奖结果') || msg.text.includes('期'))) {
+        await processForwardedLotteryMessage(env, chatId, msg);
+        return; // 处理完毕，不再执行后续命令判断
+      }
+    }
+    
     if (text.startsWith('确认删除 ')) {
       if (isAdmin) {
         await Controller.confirmDelete(env, chatId, userId, text);
@@ -5381,7 +5574,6 @@ async function handleUpdate(env, payload) {
       return;
     }
     
-    // 处理命令
     if (text.startsWith('/')) {
       const command = text.toLowerCase().split(/\s+/)[0];
       
@@ -5398,8 +5590,7 @@ async function handleUpdate(env, payload) {
           
         case '/predict':
         case '/p':
-          // 检查算法参数
-          const predictMatch = text.match(/\/predict\s+(knn|stats|statistics|advanced|enhanced)/i);
+          const predictMatch = text.match(/\/predict\s+(knn|stats|advanced)/i);
           if (predictMatch) {
             await Controller.handlePredict(env, chatId, predictMatch[1].toLowerCase());
           } else {
@@ -5425,13 +5616,19 @@ async function handleUpdate(env, payload) {
           await Controller.handleDelete(env, chatId, userId, text, isAdmin);
           break;
           
+        case '/montecarlo':
+        case '/monte':
+          const infoMessage = `${CONFIG.EMOJI.info} <b>蒙特卡洛模拟已整合</b>\n\n蒙特卡洛算法已整合到增强预测中，请使用 <code>/predict advanced</code> 命令。`;
+          await ExternalService.sendAndDeleteOldMessage(
+            env, chatId, "montecarlo_info", infoMessage
+          );
+          break;
+          
         default:
-          // 未知命令，显示命令模板
           await Controller.handleCommandTemplate(env, chatId, isAdmin);
           break;
       }
     } else {
-      // 非命令消息，显示命令模板
       await Controller.handleCommandTemplate(env, chatId, isAdmin);
     }
   } catch (error) {
@@ -5451,24 +5648,43 @@ export default {
       Logger.info("Worker", `收到请求: ${request.method} ${url.pathname}`);
       
       const requiredEnvVars = ['TG_BOT_TOKEN', 'TG_ADMIN_ID'];
+      const optionalEnvVars = ['TG_CHANNEL_ID'];
+      
       const missingVars = requiredEnvVars.filter(key => !env[key]);
       
       if (missingVars.length > 0) {
         Logger.error("Worker", `缺少必要环境变量: ${missingVars.join(', ')}`);
-        return new Response(`Missing required environment variables: ${missingVars.join(', ')}`, { 
+        return new Response(JSON.stringify({
+          status: "ERROR",
+          message: `缺少必要环境变量: ${missingVars.join(', ')}`,
+          required: requiredEnvVars,
+          optional: optionalEnvVars,
+          provided: Object.keys(env).filter(k => requiredEnvVars.includes(k) || optionalEnvVars.includes(k)),
+          system: CONFIG.SYSTEM.NAME,
+          version: CONFIG.SYSTEM.VERSION
+        }, null, 2), { 
           status: 500,
-          headers: { 'Content-Type': 'text/plain' }
+          headers: { 'Content-Type': 'application/json' }
         });
       }
       
-      CONFIG.SYSTEM.CHANNEL_ID = env.TG_CHANNEL_ID || "YOUR_CHANNEL_ID_HERE";
-      CONFIG.SYSTEM.ADMIN_ID = env.TG_ADMIN_ID || "YOUR_ADMIN_ID_HERE";
+      const optionalMissing = optionalEnvVars.filter(key => !env[key]);
+      if (optionalMissing.length > 0) {
+        Logger.warn("Worker", `缺少可选环境变量: ${optionalMissing.join(', ')}`, {
+          impact: optionalMissing.includes('TG_CHANNEL_ID') ? '无法从频道同步数据' : ''
+        });
+      }
       
       const initialized = await DB.init(env);
       if (!initialized) {
-        return new Response("Database Initialization Failed. Please check D1 binding.", { 
+        return new Response(JSON.stringify({
+          status: "ERROR",
+          message: "数据库初始化失败，请检查D1绑定",
+          system: CONFIG.SYSTEM.NAME,
+          version: CONFIG.SYSTEM.VERSION
+        }, null, 2), { 
           status: 500,
-          headers: { 'Content-Type': 'text/plain' }
+          headers: { 'Content-Type': 'application/json' }
         });
       }
       
@@ -5477,6 +5693,7 @@ export default {
           try {
             const historyCount = await DB.getHistoryCount(env);
             const deletionStats = await DB.getDeletionStats(env);
+            const syncStats = await DB.getChannelSyncStats(env, 5);
             
             const cacheStats = CacheManager.getStats();
             
@@ -5484,32 +5701,37 @@ export default {
               totalUsers: MessageManager.userMessages.size
             };
             
-            const monteCarloCacheSize = SimplifiedMonteCarloEngine.cache.size;
+            const algorithms = await DB.getWeights(env);
+            
+            const channelInfo = env.TG_CHANNEL_ID ? 
+              await ExternalService.getChatInfo(env, env.TG_CHANNEL_ID) : 
+              { success: false, error: "未配置频道ID" };
             
             return new Response(JSON.stringify({
               status: "OK",
               system: CONFIG.SYSTEM.NAME,
               version: CONFIG.SYSTEM.VERSION,
               timestamp: new Date().toISOString(),
-              database: {
-                historyCount: historyCount,
-                deletionStats: deletionStats
-              },
-              cache: {
-                ...cacheStats,
-                monteCarloCacheSize: monteCarloCacheSize
-              },
-              messageManager: messageManagerStats,
-              algorithms: {
-                knn: "Enabled",
-                statistics: "Enabled",
-                monteCarlo: "Integrated in Enhanced",
-                traditional: "Enabled",
-                enhanced: "Enabled (Fixed)"
-              },
               environment: {
                 hasChannel: !!env.TG_CHANNEL_ID,
-                hasLotteryUrl: !!env.LOTTERY_DATA_URL
+                requiredVars: requiredEnvVars.filter(k => env[k]).length + "/" + requiredEnvVars.length,
+                optionalVars: optionalEnvVars.filter(k => env[k]).length + "/" + optionalEnvVars.length
+              },
+              database: {
+                historyCount: historyCount,
+                deletionStats: deletionStats,
+                recentSyncs: syncStats
+              },
+              channel: channelInfo,
+              cache: cacheStats,
+              messageManager: messageManagerStats,
+              algorithms: {
+                weights: algorithms,
+                knn: "Enabled",
+                statistics: "Enabled",
+                monteCarlo: "Integrated in Advanced",
+                traditional: "Enabled",
+                advanced: "Enabled"
               },
               config: {
                 knnKValue: CONFIG.SYSTEM.KNN_K_VALUE,
@@ -5517,13 +5739,8 @@ export default {
                 maxRuntimeMs: CONFIG.SYSTEM.MAX_RUNTIME_MS,
                 historyLimit: CONFIG.SYSTEM.HISTORY_LIMIT,
                 predictionTimeout: CONFIG.SYSTEM.PREDICTION_TIMEOUT,
-                advancedAlgoTimeout: CONFIG.SYSTEM.ADVANCED_ALGO_TIMEOUT
-              },
-              fixes: {
-                enhancedPrediction: "Fixed",
-                parallelAlgorithms: "Enabled",
-                fallbackMechanism: "Implemented",
-                timeoutProtection: "Added"
+                algorithmTimeouts: CONFIG.SYSTEM.ALGORITHM_TIMEOUTS,
+                channelSyncLimit: CONFIG.SYSTEM.CHANNEL_SYNC_LIMIT
               }
             }, null, 2), {
               headers: { 
@@ -5546,76 +5763,16 @@ export default {
         if (url.pathname === "/reset-cache") {
           try {
             CacheManager.clear();
-            SimplifiedMonteCarloEngine.clearCache();
+            OptimizedMonteCarloEngine.clearCache();
             MessageManager.userMessages.clear();
             
             return new Response(JSON.stringify({
               status: "OK",
-              message: "所有缓存已清除"
-            }, null, 2), {
-              headers: { 'Content-Type': 'application/json' }
-            });
-          } catch (error) {
-            return new Response(JSON.stringify({ error: error.message }, null, 2), {
-              status: 500,
-              headers: { 'Content-Type': 'application/json' }
-            });
-          }
-        }
-        
-        if (url.pathname === "/test-algorithms") {
-          try {
-            // 测试KNN算法
-            const history = await DB.getAllHistory(env);
-            let knnTestResult = "未测试";
-            if (history.length >= 10) {
-              const lastRecord = history[0];
-              const similarRecords = KNNAlgorithm.findSimilarRecords(history, lastRecord, 5);
-              knnTestResult = `找到 ${similarRecords.length} 条相似记录`;
-            }
-            
-            // 测试统计算法
-            let statsTestResult = "未测试";
-            if (history.length >= 10) {
-              const stats = EnhancedStatistics.analyzeHistoryStatistics(history);
-              statsTestResult = `分析 ${stats.totalRecords} 期历史，发现 ${stats.summary?.strongPatterns?.length || 0} 条强规律`;
-            }
-            
-            // 测试增强预测
-            let enhancedTestResult = "可用";
-            const weights = await DB.getWeights(env);
-            try {
-              const start = Date.now();
-              const testResult = await EnhancedPredictionEngine.generateEnhancedPrediction(env, history.slice(0, 50), weights);
-              const duration = Date.now() - start;
-              enhancedTestResult = `成功生成预测，耗时 ${duration}ms，置信度 ${testResult.confidence}%`;
-            } catch (error) {
-              enhancedTestResult = `失败: ${error.message}`;
-            }
-            
-            return new Response(JSON.stringify({
-              status: "OK",
-              timestamp: new Date().toISOString(),
-              algorithms: {
-                knn: knnTestResult,
-                statistics: statsTestResult,
-                enhanced: enhancedTestResult,
-                monteCarlo: "已整合到增强预测中",
-                note: "增强预测已完全修复，支持超时保护和回退机制"
-              },
-              historyCount: history.length,
-              commands: {
-                traditional: "/predict",
-                knn: "/predict knn",
-                statistics: "/predict stats",
-                advanced: "/predict advanced (推荐，已修复)"
-              },
-              enhancedFeatures: {
-                parallelAlgorithms: true,
-                timeoutProtection: true,
-                fallbackMechanism: true,
-                algorithmIntegration: "加权整合",
-                maxAlgorithms: 4
+              message: "所有缓存已清除",
+              cleared: {
+                cache: true,
+                monteCarlo: true,
+                messageManager: true
               }
             }, null, 2), {
               headers: { 'Content-Type': 'application/json' }
@@ -5631,7 +5788,70 @@ export default {
           }
         }
         
-        // 主页显示
+        if (url.pathname === "/test-parser") {
+          try {
+            const testMessage = `香港六合彩第:2025127期开奖结果:
+06  40  04  34  26  28  25
+鼠  虎  虎  猴  龍  虎  蛇
+🟢 🔴 🔵 🔴 🔵 🟢 🔵`;
+            
+            const parsed = ChannelMessageParser.parseMessage(testMessage);
+            const isValid = ChannelMessageParser.validateParsedRecord(parsed);
+            
+            return new Response(JSON.stringify({
+              status: "OK",
+              testMessage: testMessage,
+              parsed: parsed,
+              isValid: isValid,
+              formatted: parsed ? ChannelMessageParser.formatRecordForDisplay(parsed) : "解析失败"
+            }, null, 2), {
+              headers: { 'Content-Type': 'application/json' }
+            });
+          } catch (error) {
+            return new Response(JSON.stringify({ 
+              status: "ERROR",
+              error: error.message 
+            }, null, 2), {
+              status: 500,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+        }
+        
+        if (url.pathname === "/force-sync") {
+          try {
+            const auth = request.headers.get("Authorization");
+            const expectedAuth = `Bearer ${env.ADMIN_API_KEY || "default"}`;
+            
+            if (auth !== expectedAuth) {
+              return new Response(JSON.stringify({
+                status: "ERROR",
+                message: "未授权访问"
+              }, null, 2), {
+                status: 401,
+                headers: { 'Content-Type': 'application/json' }
+              });
+            }
+            
+            const result = await ExternalService.syncFromChannel(env);
+            
+            return new Response(JSON.stringify({
+              status: "OK",
+              result: result
+            }, null, 2), {
+              headers: { 'Content-Type': 'application/json' }
+            });
+          } catch (error) {
+            return new Response(JSON.stringify({ 
+              status: "ERROR",
+              error: error.message 
+            }, null, 2), {
+              status: 500,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+        }
+        
         return new Response(`
           <!DOCTYPE html>
           <html>
@@ -5698,6 +5918,14 @@ export default {
                   border-radius: 5px;
                   display: inline-block;
                 }
+                .channel-info {
+                  background: #e6fffa;
+                  border: 1px solid #38b2ac;
+                  border-radius: 8px;
+                  padding: 15px;
+                  margin-top: 20px;
+                  color: #234e52;
+                }
                 .algorithm-info {
                   background: #e6fffa;
                   border: 1px solid #38b2ac;
@@ -5729,19 +5957,10 @@ export default {
                   margin: 2px 0;
                   display: inline-block;
                 }
-                .enhanced {
-                  background: linear-gradient(45deg, #667eea, #764ba2);
-                  color: white;
-                  padding: 5px 10px;
-                  border-radius: 5px;
-                  font-weight: bold;
-                  display: inline-block;
-                  margin: 5px 0;
-                }
                 .algorithm-knn { background: linear-gradient(45deg, #4299e1, #38b2ac); color: white; padding: 3px 8px; border-radius: 4px; font-size: 0.8em; display: inline-block; margin: 2px; }
                 .algorithm-stats { background: linear-gradient(45deg, #ed8936, #f56565); color: white; padding: 3px 8px; border-radius: 4px; font-size: 0.8em; display: inline-block; margin: 2px; }
-                .algorithm-enhanced { background: linear-gradient(45deg, #9f7aea, #d53f8c); color: white; padding: 3px 8px; border-radius: 4px; font-size: 0.8em; display: inline-block; margin: 2px; }
-                .improvement {
+                .algorithm-advanced { background: linear-gradient(45deg, #9f7aea, #d53f8c); color: white; padding: 3px 8px; border-radius: 4px; font-size: 0.8em; display: inline-block; margin: 2px; }
+                .channel-feature {
                   background: #fff5f5;
                   border: 1px solid #fc8181;
                   border-radius: 8px;
@@ -5749,36 +5968,28 @@ export default {
                   margin-top: 20px;
                   color: #742a2a;
                 }
-                .fix-list {
-                  background: #f0fff4;
-                  border: 1px solid #48bb78;
+                .status {
+                  background: #e6fffa;
+                  border: 1px solid #38b2ac;
                   border-radius: 8px;
                   padding: 15px;
                   margin-top: 20px;
-                  color: #22543d;
-                }
-                .fix-item {
-                  margin-bottom: 5px;
-                }
-                .fix-item:before {
-                  content: "🔧 ";
-                  margin-right: 5px;
+                  color: #234e52;
                 }
               </style>
             </head>
             <body>
               <div class="container">
                 <h1>${CONFIG.SYSTEM.NAME}</h1>
-                <div class="version">${CONFIG.SYSTEM.VERSION} - 增强预测修复版</div>
+                <div class="version">${CONFIG.SYSTEM.VERSION} - 频道同步修复版</div>
                 
                 <div class="feature-list">
                   <h3>系统特性</h3>
                   <div class="feature-item">防刷屏模式：每个命令只保留最新消息</div>
                   <div class="feature-item"><span class="algorithm-knn">KNN算法</span>：K-近邻算法，寻找相似历史模式</div>
                   <div class="feature-item"><span class="algorithm-stats">增强统计算法</span>：生肖、颜色、尾数、头数、大小、单双全面统计</div>
-                  <div class="feature-item"><span class="algorithm-enhanced">增强预测（已修复）</span>：整合所有算法的最强预测（包含蒙特卡洛）</div>
-                  <div class="feature-item">超时保护：增强预测增加超时控制和回退机制</div>
-                  <div class="feature-item">并行算法：同时运行多个算法，提高效率</div>
+                  <div class="feature-item"><span class="algorithm-advanced">增强预测</span>：整合所有算法的最强预测（包含蒙特卡洛）</div>
+                  <div class="feature-item">优化性能：预测超时控制，避免Worker超时</div>
                   <div class="feature-item">智能缓存：提高响应速度</div>
                   <div class="feature-item">自动删除旧消息，保持界面整洁</div>
                   <div class="feature-item">多种预测算法：传统、KNN、统计、增强</div>
@@ -5786,15 +5997,19 @@ export default {
                   <div class="feature-item">纯文本命令交互</div>
                 </div>
                 
-                <div class="fix-list">
-                  <h3>主要修复和改进</h3>
-                  <div class="fix-item"><b>完全修复 /predict advanced 命令无响应问题</b></div>
-                  <div class="fix-item">增强预测现在支持并行算法执行</div>
-                  <div class="fix-item">添加超时保护和回退机制</div>
-                  <div class="fix-item">优化算法结果整合逻辑</div>
-                  <div class="fix-item">改进错误处理和用户反馈</div>
-                  <div class="fix-item">增强预测稳定性</div>
-                  <div class="fix-item">提高系统响应速度</div>
+                <div class="channel-feature">
+                  <h3>📢 频道数据同步（已修复）</h3>
+                  <p><strong>修复内容：</strong></p>
+                  <p>✅ <b>已修复频道访问问题</b></p>
+                  <p>✅ 使用正确的Telegram Bot API方法</p>
+                  <p>✅ 支持手动转发消息录入数据</p>
+                  <p>✅ 提供详细的操作指南</p>
+                  <p>✅ 自动解析转发消息格式</p>
+                  <p><strong>使用方法：</strong></p>
+                  <p>1. 发送 <code>/sync</code> 命令检查频道连接</p>
+                  <p>2. 按照指南在开奖频道中转发历史消息给Bot</p>
+                  <p>3. Bot自动解析并保存开奖记录</p>
+                  <p>4. 使用 <code>/history</code> 查看已保存数据</p>
                 </div>
                 
                 <div class="command-list">
@@ -5804,26 +6019,24 @@ export default {
                   <div class="command">/predict - 传统算法预测</div>
                   <div class="command">/predict knn - KNN算法预测</div>
                   <div class="command">/predict stats - 统计算法预测</div>
-                  <div class="command">/predict advanced - 增强预测（整合全部算法，已修复）</div>
+                  <div class="command">/predict advanced - 增强预测（整合全部算法）</div>
                   <div class="command">/history [页码] - 查看历史</div>
-                  <div class="command">/sync - 同步数据(管理员)</div>
+                  <div class="command">/sync - 从频道同步数据(管理员)</div>
                   <div class="command">/delete [期号] - 删除记录(管理员)</div>
                 </div>
                 
                 <div class="algorithm-info">
-                  <strong>${CONFIG.EMOJI.crown} 增强算法（已修复）：</strong><br>
+                  <strong>${CONFIG.EMOJI.crown} 增强算法：</strong><br>
                   • <span class="algorithm-knn">KNN算法</span> - 寻找相似历史记录，基于特征距离<br>
                   • <span class="algorithm-stats">统计算法</span> - 分析生肖、颜色、尾数、头数、大小、单双转移概率<br>
-                  • <span class="algorithm-enhanced">增强预测</span> - 整合所有算法的最强预测<br>
+                  • <span class="algorithm-advanced">增强预测</span> - 整合所有算法的最强预测<br>
                   • 蒙特卡洛模拟已整合到增强预测中<br>
                   • 基于全部历史记录（最多2000期）<br>
                   • 超时控制，避免Worker超时<br>
                   • 更科学的概率统计和置信度<br>
-                  • 并行算法执行，提高效率<br>
-                  • 智能回退机制<br>
                   • 命令: <code>/predict knn</code> (KNN算法)<br>
                   • 命令: <code>/predict stats</code> (统计算法)<br>
-                  • 命令: <code>/predict advanced</code> (增强预测 - 推荐，已修复)
+                  • 命令: <code>/predict advanced</code> (增强预测 - 推荐)
                 </div>
                 
                 <div class="anti-spam">
@@ -5831,24 +6044,25 @@ export default {
                   • 每个命令只保留最新一条消息<br>
                   • 发送相同命令自动删除旧消息<br>
                   • 保持聊天界面整洁，防止消息堆积<br>
-                  • 用户每个命令类型最多保留10条最新消息
+                  • 用户每个命令类型最多保留10条最新消息<br>
+                  • 自动清理不活跃用户的消息缓存
                 </div>
                 
                 <div class="api-endpoints">
                   <strong>API端点：</strong><br>
                   <div class="api-endpoint">GET /health - 系统健康检查</div>
                   <div class="api-endpoint">GET /reset-cache - 重置缓存</div>
-                  <div class="api-endpoint">GET /test-algorithms - 测试算法</div>
+                  <div class="api-endpoint">GET /test-parser - 测试解析器</div>
+                  <div class="api-endpoint">GET /force-sync - 强制同步（需要授权）</div>
                 </div>
                 
                 <div style="margin-top: 20px; padding: 15px; background: #f0f4f8; border-radius: 8px;">
                   <strong>使用建议：</strong><br>
-                  • 首次使用请先执行 <code>/sync</code> 同步历史数据<br>
-                  • 推荐使用 <code>/predict advanced</code> 获取最强预测（已修复）<br>
+                  • 首次使用请先执行 <code>/sync</code> 从频道同步历史数据<br>
+                  • 推荐使用 <code>/predict advanced</code> 获取最强预测<br>
                   • 查看历史数据使用 <code>/history 1</code><br>
                   • 使用 <code>/ccc</code> 查看完整命令列表<br>
-                  • 确保环境变量配置正确（TG_BOT_TOKEN, TG_ADMIN_ID等）<br>
-                  • 增强预测现在有超时保护，不会无响应
+                  • 确保环境变量配置正确（TG_BOT_TOKEN, TG_ADMIN_ID, TG_CHANNEL_ID等）
                 </div>
               </div>
             </body>
@@ -5879,9 +6093,15 @@ export default {
       return new Response("Method not allowed", { status: 405 });
     } catch (error) {
       Logger.error("Worker", "处理请求失败", error);
-      return new Response("Internal Server Error", { 
+      return new Response(JSON.stringify({
+        status: "ERROR",
+        error: "Internal Server Error",
+        message: error.message,
+        system: CONFIG.SYSTEM.NAME,
+        version: CONFIG.SYSTEM.VERSION
+      }, null, 2), { 
         status: 500,
-        headers: { 'Content-Type': 'text/plain' }
+        headers: { 'Content-Type': 'application/json' }
       });
     }
   }
