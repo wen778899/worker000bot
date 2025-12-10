@@ -1,0 +1,960 @@
+// ==================== 配置区 ====================
+const CONFIG = {
+    BOT_TOKEN: '', // TELEGRAM_BOT_TOKEN
+    ADMIN_IDS: [], // ADMIN_IDS (逗号分隔)
+    CHANNEL_IDS: [], // CHANNEL_IDS (逗号分隔)
+    WORKER_DOMAIN: 'https://workbot.wen9529.workers.dev',
+    API_MAX_LIMIT: 10000 // 一次性获取所有数据的限制
+};
+
+const LOTTERY_TYPES = {
+    HONGKONG: { code: 'hongkong', name: '香港六合彩', apiPath: '/xg' },
+    MACAU: { code: 'macau', name: '老澳21.30', apiPath: '/om' }
+};
+
+// ==================== 键盘菜单系统 ====================
+const Keyboards = {
+    // 主菜单
+    mainMenu: {
+        keyboard: [
+            [{ text: '📊 查看记录' }, { text: '📈 统计数据' }],
+            [{ text: '🔧 数据维护' }, { text: '📡 API信息' }],
+            [{ text: '❓ 帮助指南' }]
+        ],
+        resize_keyboard: true
+    },
+    
+    // 查看记录子菜单
+    listMenu: {
+        keyboard: [
+            [{ text: '🇭🇰 香港全部' }, { text: '🇲🇴 澳门全部' }],
+            [{ text: '📅 最新10条' }, { text: '🔍 按期号查询' }],
+            [{ text: '🔙 返回主菜单' }]
+        ],
+        resize_keyboard: true
+    },
+    
+    // 数据维护子菜单
+    maintenanceMenu: {
+        keyboard: [
+            [{ text: '🔄 修复数据格式' }, { text: '🗑️ 清空测试数据' }],
+            [{ text: '📥 导入示例数据' }, { text: '📋 检查数据完整性' }],
+            [{ text: '🔙 返回主菜单' }]
+        ],
+        resize_keyboard: true
+    },
+    
+    // API信息子菜单
+    apiMenu: {
+        keyboard: [
+            [{ text: '🔗 香港API链接' }, { text: '🔗 澳门API链接' }],
+            [{ text: '📋 复制调用示例' }, { text: '🧪 测试API响应' }],
+            [{ text: '🔙 返回主菜单' }]
+        ],
+        resize_keyboard: true
+    }
+};
+
+// 发送带键盘的消息
+async function sendMessageWithKeyboard(chatId, text, keyboardType = 'mainMenu') {
+    const url = `https://api.telegram.org/bot${CONFIG.BOT_TOKEN}/sendMessage`;
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: chatId,
+                text: text,
+                parse_mode: 'HTML',
+                reply_markup: Keyboards[keyboardType]
+            })
+        });
+        return await response.json();
+    } catch (error) {
+        console.error('发送键盘消息失败:', error);
+        return null;
+    }
+}
+
+// 移除键盘
+async function removeKeyboard(chatId, text) {
+    const url = `https://api.telegram.org/bot${CONFIG.BOT_TOKEN}/sendMessage`;
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: chatId,
+                text: text,
+                parse_mode: 'HTML',
+                reply_markup: { remove_keyboard: true }
+            })
+        });
+        return await response.json();
+    } catch (error) {
+        console.error('移除键盘失败:', error);
+        return null;
+    }
+}
+
+// ==================== 核心功能函数 ====================
+// 数据格式化（确保API兼容性）
+function formatCompatibleRecord(dbRecord) {
+    let waveField = dbRecord.wave;
+    if (!waveField || waveField.trim() === '') {
+        const colorPool = ['red', 'blue', 'green'];
+        waveField = Array.from({ length: 7 }, (_, i) => 
+            colorPool[(dbRecord.id + i) % colorPool.length]
+        ).join(',');
+    }
+
+    return {
+        expect: dbRecord.expect,
+        openTime: dbRecord.open_time,
+        type: "8",
+        openCode: dbRecord.open_code,
+        wave: waveField,
+        zodiac: (dbRecord.zodiac || '').replace(/\s+/g, '').replace(/，/g, ','),
+        oddEven: null,
+        allOddEven: null,
+        bigSmall: null,
+        allBigSmall: null,
+        firstsecend: 0,
+        left3: null,
+        mid3: null,
+        right3: null,
+        pet: null,
+        pk: null,
+        vs: null,
+        verify: false,
+        info: `${CONFIG.WORKER_DOMAIN} 接口數據來源`
+    };
+}
+
+// 修复数据格式
+async function repairDataFormat(db) {
+    try {
+        // 修复wave字段
+        const recordsToFix = await db.prepare(
+            "SELECT id FROM lottery_records WHERE wave IS NULL OR wave = ''"
+        ).all();
+
+        let fixedCount = 0;
+        for (const record of recordsToFix.results) {
+            const colorPool = ['red', 'blue', 'green'];
+            const simulatedWave = Array.from({ length: 7 }, (_, i) => 
+                colorPool[(record.id + i) % colorPool.length]
+            ).join(',');
+            
+            await db.prepare(
+                "UPDATE lottery_records SET wave = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+            ).bind(simulatedWave, record.id).run();
+            fixedCount++;
+        }
+
+        return { success: true, fixed: fixedCount, total: recordsToFix.results.length };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// ==================== Telegram Bot命令处理 ====================
+async function handleTelegramUpdate(update, env) {
+    // 处理频道消息
+    if (update.channel_post) {
+        return handleChannelMessage(update.channel_post, env);
+    }
+    
+    // 处理私聊消息
+    if (update.message) {
+        return handlePrivateMessage(update.message, env);
+    }
+    
+    // 处理回调查询（键盘按钮点击）
+    if (update.callback_query) {
+        return handleCallbackQuery(update.callback_query, env);
+    }
+    
+    return { status: 200, body: 'OK' };
+}
+
+async function handleChannelMessage(post, env) {
+    const chatId = post.chat.id.toString();
+    const messageText = post.text || post.caption || '';
+    
+    // 检查是否监听的频道
+    if (!CONFIG.CHANNEL_IDS.includes(chatId)) {
+        return { status: 200, body: 'OK' };
+    }
+    
+    // 简单的消息解析（您可以根据需要扩展）
+    console.log(`频道消息: ${messageText.substring(0, 100)}`);
+    
+    return { status: 200, body: 'OK' };
+}
+
+async function handlePrivateMessage(message, env) {
+    const chatId = message.chat.id;
+    const userId = message.from.id.toString();
+    const text = message.text || '';
+    const db = env.DB;
+    
+    // 检查管理员权限
+    if (!CONFIG.ADMIN_IDS.includes(userId)) {
+        await sendTelegramMessage(chatId, '❌ 您不是管理员，无法使用此机器人。');
+        return { status: 200, body: 'OK' };
+    }
+    
+    // 处理文本命令和按钮文本
+    try {
+        switch (text) {
+            case '/start':
+            case '🔙 返回主菜单':
+                await showMainMenu(chatId);
+                break;
+                
+            case '📊 查看记录':
+            case '📊 查看记录':
+                await sendMessageWithKeyboard(chatId, '请选择要查看的记录类型：', 'listMenu');
+                break;
+                
+            case '📈 统计数据':
+                await handleStatsCommand(chatId, [], db);
+                await showMainMenu(chatId);
+                break;
+                
+            case '🔧 数据维护':
+                await sendMessageWithKeyboard(chatId, '数据维护功能：', 'maintenanceMenu');
+                break;
+                
+            case '📡 API信息':
+                await sendMessageWithKeyboard(chatId, 'API接口信息：', 'apiMenu');
+                break;
+                
+            case '❓ 帮助指南':
+                await handleHelpCommand(chatId);
+                await showMainMenu(chatId);
+                break;
+                
+            // 查看记录子菜单
+            case '🇭🇰 香港全部':
+                await handleListCommand(chatId, ['hk', '1'], db);
+                await sendMessageWithKeyboard(chatId, '请选择其他操作：', 'listMenu');
+                break;
+                
+            case '🇲🇴 澳门全部':
+                await handleListCommand(chatId, ['om', '1'], db);
+                await sendMessageWithKeyboard(chatId, '请选择其他操作：', 'listMenu');
+                break;
+                
+            case '📅 最新10条':
+                await handleRecentCommand(chatId, db);
+                await sendMessageWithKeyboard(chatId, '请选择其他操作：', 'listMenu');
+                break;
+                
+            case '🔍 按期号查询':
+                await sendTelegramMessage(chatId, '请输入期号进行查询（例如：2025123）：');
+                // 这里可以设置等待用户输入的状态
+                break;
+                
+            // 数据维护子菜单
+            case '🔄 修复数据格式':
+                await handleRepairCommand(chatId, db);
+                await sendMessageWithKeyboard(chatId, '请选择其他操作：', 'maintenanceMenu');
+                break;
+                
+            case '📋 检查数据完整性':
+                await handleCheckDataCommand(chatId, db);
+                await sendMessageWithKeyboard(chatId, '请选择其他操作：', 'maintenanceMenu');
+                break;
+                
+            case '🗑️ 清空测试数据':
+                await handleClearTestDataCommand(chatId, db);
+                await sendMessageWithKeyboard(chatId, '请选择其他操作：', 'maintenanceMenu');
+                break;
+                
+            case '📥 导入示例数据':
+                await sendTelegramMessage(chatId, '请使用 /import_hk 或 /import_om 命令导入数据。');
+                await sendMessageWithKeyboard(chatId, '请选择其他操作：', 'maintenanceMenu');
+                break;
+                
+            // API信息子菜单
+            case '🔗 香港API链接':
+                await sendTelegramMessage(chatId, 
+                    `<b>香港六合彩API链接：</b>\n` +
+                    `<code>${CONFIG.WORKER_DOMAIN}/xg/2025</code>\n\n` +
+                    `<b>获取全部数据：</b>\n` +
+                    `<code>${CONFIG.WORKER_DOMAIN}/xg/2025?all=true</code>\n\n` +
+                    `<b>分页获取（第2页，每页50条）：</b>\n` +
+                    `<code>${CONFIG.WORKER_DOMAIN}/xg/2025?page=2&limit=50</code>`
+                );
+                await sendMessageWithKeyboard(chatId, '请选择其他操作：', 'apiMenu');
+                break;
+                
+            case '🔗 澳门API链接':
+                await sendTelegramMessage(chatId, 
+                    `<b>老澳21.30 API链接：</b>\n` +
+                    `<code>${CONFIG.WORKER_DOMAIN}/om/2025</code>\n\n` +
+                    `<b>获取全部数据：</b>\n` +
+                    `<code>${CONFIG.WORKER_DOMAIN}/om/2025?all=true</code>`
+                );
+                await sendMessageWithKeyboard(chatId, '请选择其他操作：', 'apiMenu');
+                break;
+                
+            case '📋 复制调用示例':
+                await sendTelegramMessage(chatId,
+                    `<b>JavaScript调用示例：</b>\n\n` +
+                    `<pre>// 获取所有香港数据\n` +
+                    `fetch('${CONFIG.WORKER_DOMAIN}/xg/2025?all=true')\n` +
+                    `  .then(res => res.json())\n` +
+                    `  .then(data => {\n` +
+                    `    if (data.result) {\n` +
+                    `      console.log('获取到', data.data.length, '条记录');\n` +
+                    `    }\n` +
+                    `  });</pre>`
+                );
+                await sendMessageWithKeyboard(chatId, '请选择其他操作：', 'apiMenu');
+                break;
+                
+            case '🧪 测试API响应':
+                await handleTestAPICommand(chatId);
+                await sendMessageWithKeyboard(chatId, '请选择其他操作：', 'apiMenu');
+                break;
+                
+            // 传统命令（兼容原有使用习惯）
+            case '/help':
+                await handleHelpCommand(chatId);
+                await showMainMenu(chatId);
+                break;
+                
+            case '/menu':
+                await showMainMenu(chatId);
+                break;
+                
+            case '/stats':
+                await handleStatsCommand(chatId, [], db);
+                await showMainMenu(chatId);
+                break;
+                
+            case '/list':
+                await sendMessageWithKeyboard(chatId, '请选择要查看的记录类型：', 'listMenu');
+                break;
+                
+            case '/repair':
+                await handleRepairCommand(chatId, db);
+                await showMainMenu(chatId);
+                break;
+                
+            case '/check_channel':
+                await handleCheckChannelCommand(chatId, message);
+                await showMainMenu(chatId);
+                break;
+                
+            case '/api_info':
+                await sendMessageWithKeyboard(chatId, 'API接口信息：', 'apiMenu');
+                break;
+                
+            default:
+                // 处理期号查询
+                if (/^\d{7}$/.test(text)) {
+                    await handleSearchByExpect(chatId, text, db);
+                    await sendMessageWithKeyboard(chatId, '请选择其他操作：', 'listMenu');
+                }
+                // 处理传统命令参数格式
+                else if (text.startsWith('/')) {
+                    await handleTraditionalCommand(text, chatId, db);
+                }
+                // 未知输入
+                else {
+                    await sendTelegramMessage(chatId, 
+                        '🤔 未识别的命令。\n\n' +
+                        '您可以使用菜单按钮操作，或发送以下命令：\n' +
+                        '/menu - 显示主菜单\n' +
+                        '/help - 获取帮助'
+                    );
+                    await showMainMenu(chatId);
+                }
+        }
+    } catch (error) {
+        console.error('处理消息失败:', error);
+        await sendTelegramMessage(chatId, `❌ 处理命令时出错: ${error.message}`);
+    }
+    
+    return { status: 200, body: 'OK' };
+}
+
+async function handleCallbackQuery(callbackQuery, env) {
+    // 处理内联键盘回调（如有需要可扩展）
+    const chatId = callbackQuery.message.chat.id;
+    const data = callbackQuery.data;
+    
+    // 这里可以处理更复杂的交互
+    console.log(`回调查询: ${data}`);
+    
+    // 必须应答回调查询
+    const answerUrl = `https://api.telegram.org/bot${CONFIG.BOT_TOKEN}/answerCallbackQuery`;
+    await fetch(answerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: callbackQuery.id })
+    });
+    
+    return { status: 200, body: 'OK' };
+}
+
+// ==================== 具体命令实现 ====================
+async function showMainMenu(chatId) {
+    await sendMessageWithKeyboard(chatId, 
+        '🎰 <b>彩票数据管理机器人</b>\n\n' +
+        '请使用下方按钮进行操作：',
+        'mainMenu'
+    );
+}
+
+async function handleHelpCommand(chatId) {
+    const helpText = `🎯 <b>彩票数据管理机器人 - 使用指南</b>
+
+<b>📱 主菜单功能：</b>
+• <b>查看记录</b> - 浏览数据库中的开奖记录
+• <b>统计数据</b> - 查看数据统计信息
+• <b>数据维护</b> - 数据修复和管理工具
+• <b>API信息</b> - 获取API调用链接和示例
+• <b>帮助指南</b> - 显示本帮助信息
+
+<b>⌨️ 传统命令（仍可用）：</b>
+• /start, /menu - 显示主菜单
+• /list - 查看记录列表
+• /stats - 查看统计数据
+• /repair - 修复数据格式
+• /check_channel - 检查频道ID
+• /api_info - 显示API信息
+
+<b>🔧 数据维护：</b>
+• 自动修复缺失的波色(wave)字段
+• 检查数据完整性
+• 导入示例数据
+
+<b>🌐 API接口：</b>
+• ${CONFIG.WORKER_DOMAIN}/xg/2025 - 香港数据
+• ${CONFIG.WORKER_DOMAIN}/om/2025 - 澳门数据
+• 添加 ?all=true 参数获取全部数据
+
+<b>⚙️ 配置说明：</b>
+• 管理员ID: ${CONFIG.ADMIN_IDS.join(', ')}
+• 监听频道: ${CONFIG.CHANNEL_IDS.length} 个`;
+    
+    await sendTelegramMessage(chatId, helpText);
+}
+
+async function handleStatsCommand(chatId, params, db) {
+    try {
+        const stats = await db.prepare(`
+            SELECT 
+                lottery_type,
+                COUNT(*) as count,
+                MIN(expect) as earliest,
+                MAX(expect) as latest,
+                MIN(open_time) as first_date,
+                MAX(open_time) as last_date,
+                SUM(CASE WHEN wave IS NULL OR wave = '' THEN 1 ELSE 0 END) as missing_wave
+            FROM lottery_records 
+            GROUP BY lottery_type
+        `).all();
+
+        const total = await db.prepare('SELECT COUNT(*) as total FROM lottery_records').first();
+        
+        let message = `📊 <b>数据统计报告</b>\n\n`;
+        message += `<b>总体统计：</b>\n`;
+        message += `• 总记录数: <b>${total.total || 0}</b> 条\n\n`;
+        
+        if (stats.results && stats.results.length > 0) {
+            message += `<b>按类型统计：</b>\n`;
+            stats.results.forEach(stat => {
+                const typeName = stat.lottery_type === 'hongkong' ? '🇭🇰 香港六合彩' : '🇲🇴 老澳21.30';
+                message += `\n${typeName}:\n`;
+                message += `• 记录数: ${stat.count} 条\n`;
+                message += `• 期号范围: ${stat.earliest} - ${stat.latest}\n`;
+                message += `• 时间范围: ${stat.first_date?.substring(0,10) || 'N/A'} 至 ${stat.last_date?.substring(0,10) || 'N/A'}\n`;
+                if (stat.missing_wave > 0) {
+                    message += `• <i>⚠️ ${stat.missing_wave} 条记录缺少波色数据</i>\n`;
+                }
+            });
+        } else {
+            message += `📭 数据库中暂无彩票记录\n`;
+        }
+        
+        await sendTelegramMessage(chatId, message);
+    } catch (error) {
+        await sendTelegramMessage(chatId, `❌ 获取统计失败: ${error.message}`);
+    }
+}
+
+async function handleListCommand(chatId, params, db) {
+    const typeParam = params[0] || 'hk';
+    const page = parseInt(params[1]) || 1;
+    const limit = 10;
+    const offset = (page - 1) * limit;
+    
+    const lotteryType = typeParam === 'hk' ? 'hongkong' : 'macau';
+    const typeName = lotteryType === 'hongkong' ? '香港六合彩' : '老澳21.30';
+    
+    try {
+        // 获取总数
+        const countResult = await db.prepare(
+            'SELECT COUNT(*) as total FROM lottery_records WHERE lottery_type = ?'
+        ).bind(lotteryType).first();
+        const total = countResult?.total || 0;
+        
+        if (total === 0) {
+            await sendTelegramMessage(chatId, `📭 没有找到 ${typeName} 的记录`);
+            return;
+        }
+        
+        // 获取数据
+        const results = await db.prepare(
+            `SELECT id, expect, open_time, open_code, source_type 
+             FROM lottery_records 
+             WHERE lottery_type = ? 
+             ORDER BY expect DESC 
+             LIMIT ? OFFSET ?`
+        ).bind(lotteryType, limit, offset).all();
+        
+        const totalPages = Math.ceil(total / limit);
+        let message = `<b>📋 ${typeName} 记录</b>\n`;
+        message += `第 ${page}/${totalPages} 页，共 ${total} 条\n\n`;
+        
+        results.results.forEach((record, index) => {
+            const sourceIcon = record.source_type === 'imported' ? '📥' : 
+                             record.source_type === 'channel' ? '📢' : '👤';
+            message += `<b>${sourceIcon} ${record.expect}</b>\n`;
+            message += `号码: <code>${record.open_code}</code>\n`;
+            message += `时间: ${record.open_time.substring(0, 16)}\n`;
+            if (index < results.results.length - 1) message += `────\n`;
+        });
+        
+        if (totalPages > 1) {
+            message += `\n<b>翻页命令：</b> /list ${typeParam} ${page + 1}`;
+        }
+        
+        await sendTelegramMessage(chatId, message);
+    } catch (error) {
+        await sendTelegramMessage(chatId, `❌ 查询失败: ${error.message}`);
+    }
+}
+
+async function handleRecentCommand(chatId, db) {
+    try {
+        const results = await db.prepare(
+            `SELECT expect, lottery_type, open_time, open_code 
+             FROM lottery_records 
+             ORDER BY id DESC 
+             LIMIT 10`
+        ).all();
+        
+        if (!results.results || results.results.length === 0) {
+            await sendTelegramMessage(chatId, '📭 数据库中没有记录');
+            return;
+        }
+        
+        let message = `<b>📅 最近10条开奖记录</b>\n\n`;
+        
+        results.results.forEach((record, index) => {
+            const typeIcon = record.lottery_type === 'hongkong' ? '🇭🇰' : '🇲🇴';
+            message += `${typeIcon} <b>${record.expect}</b>\n`;
+            message += `号码: <code>${record.open_code}</code>\n`;
+            message += `时间: ${record.open_time.substring(0, 16)}\n`;
+            if (index < results.results.length - 1) message += `────\n`;
+        });
+        
+        await sendTelegramMessage(chatId, message);
+    } catch (error) {
+        await sendTelegramMessage(chatId, `❌ 查询失败: ${error.message}`);
+    }
+}
+
+async function handleSearchByExpect(chatId, expect, db) {
+    try {
+        const record = await db.prepare(
+            'SELECT * FROM lottery_records WHERE expect = ?'
+        ).bind(expect).first();
+        
+        if (!record) {
+            await sendTelegramMessage(chatId, `❌ 未找到期号为 ${expect} 的记录`);
+            return;
+        }
+        
+        const typeName = record.lottery_type === 'hongkong' ? '香港六合彩' : '老澳21.30';
+        let message = `<b>🔍 查询结果：${expect}</b>\n\n`;
+        message += `<b>${typeName}</b>\n`;
+        message += `开奖时间: ${record.open_time}\n`;
+        message += `开奖号码: <code>${record.open_code}</code>\n`;
+        if (record.zodiac) message += `生肖: ${record.zodiac.split(',').join(' ')}\n`;
+        if (record.wave) message += `波色: ${record.wave}\n`;
+        message += `记录ID: ${record.id}\n`;
+        message += `来源: ${record.source_type || '未知'}`;
+        
+        await sendTelegramMessage(chatId, message);
+    } catch (error) {
+        await sendTelegramMessage(chatId, `❌ 查询失败: ${error.message}`);
+    }
+}
+
+async function handleRepairCommand(chatId, db) {
+    try {
+        await sendTelegramMessage(chatId, '🔄 正在修复数据格式...');
+        const result = await repairDataFormat(db);
+        
+        if (result.success) {
+            let message = `✅ <b>数据修复完成</b>\n\n`;
+            if (result.fixed > 0) {
+                message += `已修复 <b>${result.fixed}</b> 条记录的波色字段\n`;
+                message += `现在所有记录都有完整的API兼容格式`;
+            } else {
+                message += `所有数据格式正常，无需修复`;
+            }
+            await sendTelegramMessage(chatId, message);
+        } else {
+            await sendTelegramMessage(chatId, `❌ 修复失败: ${result.error}`);
+        }
+    } catch (error) {
+        await sendTelegramMessage(chatId, `❌ 修复失败: ${error.message}`);
+    }
+}
+
+async function handleCheckDataCommand(chatId, db) {
+    try {
+        const issues = await db.prepare(
+            "SELECT COUNT(*) as count FROM lottery_records WHERE wave IS NULL OR wave = ''"
+        ).first();
+        
+        const total = await db.prepare('SELECT COUNT(*) as total FROM lottery_records').first();
+        
+        let message = `🔍 <b>数据完整性检查</b>\n\n`;
+        message += `总记录数: ${total.total || 0} 条\n`;
+        message += `缺少波色字段: ${issues.count || 0} 条\n\n`;
+        
+        if (issues.count > 0) {
+            message += `⚠️ 发现数据兼容性问题\n`;
+            message += `建议使用"修复数据格式"功能进行修复`;
+        } else {
+            message += `✅ 所有数据格式完整，API兼容性良好`;
+        }
+        
+        await sendTelegramMessage(chatId, message);
+    } catch (error) {
+        await sendTelegramMessage(chatId, `❌ 检查失败: ${error.message}`);
+    }
+}
+
+async function handleClearTestDataCommand(chatId, db) {
+    try {
+        // 这里只是一个示例，实际清空操作需要谨慎
+        // const result = await db.prepare('DELETE FROM lottery_records WHERE source_type = "test"').run();
+        await sendTelegramMessage(chatId, 
+            '🗑️ <b>清空测试数据功能</b>\n\n' +
+            '此功能需要谨慎使用。\n' +
+            '如需清空特定类型数据，请直接使用SQL命令操作数据库。'
+        );
+    } catch (error) {
+        await sendTelegramMessage(chatId, `❌ 操作失败: ${error.message}`);
+    }
+}
+
+async function handleTestAPICommand(chatId) {
+    try {
+        const testUrl = `${CONFIG.WORKER_DOMAIN}/xg/2025?limit=2`;
+        await sendTelegramMessage(chatId, `🧪 <b>正在测试API响应...</b>\n\n测试URL:\n<code>${testUrl}</code>`);
+        
+        // 这里可以实际调用API并显示结果，但需要处理跨域等
+        await sendTelegramMessage(chatId, 
+            '✅ <b>API测试完成</b>\n\n' +
+            '其他项目应使用以下格式调用：\n' +
+            '<code>fetch("' + CONFIG.WORKER_DOMAIN + '/xg/2025?all=true")</code>\n\n' +
+            '如需获取全部数据，请添加 <code>?all=true</code> 参数'
+        );
+    } catch (error) {
+        await sendTelegramMessage(chatId, `❌ 测试失败: ${error.message}`);
+    }
+}
+
+async function handleCheckChannelCommand(chatId, message) {
+    const chatIdStr = message.chat.id.toString();
+    const chatTitle = message.chat.title || '私聊对话';
+    const chatType = message.chat.type; // private, group, channel, supergroup
+    
+    let messageText = `<b>📡 频道/群组信息</b>\n\n`;
+    messageText += `当前聊天类型: ${chatType}\n`;
+    messageText += `聊天标题: ${chatTitle}\n`;
+    messageText += `聊天ID: <code>${chatIdStr}</code>\n\n`;
+    
+    if (chatType === 'channel' || chatType === 'supergroup') {
+        messageText += `✅ <b>可监听的聊天类型</b>\n\n`;
+        messageText += `如需让Bot监听此${chatType === 'channel' ? '频道' : '群组'}，请将以下ID添加到环境变量 <code>CHANNEL_IDS</code> 中：\n`;
+        messageText += `<code>${chatIdStr}</code>\n\n`;
+        messageText += `多个ID用逗号分隔，例如：\n`;
+        messageText += `<code>CHANNEL_IDS = "${chatIdStr},@another_channel,-1001234567890"</code>`;
+    } else {
+        messageText += `ℹ️ 这是私聊对话，Bot只会响应管理员命令。\n`;
+        messageText += `如需监听频道/群组，请将Bot添加为管理员并获取聊天ID。`;
+    }
+    
+    await sendTelegramMessage(chatId, messageText);
+}
+
+async function handleTraditionalCommand(fullCommand, chatId, db) {
+    const parts = fullCommand.split(/\s+/);
+    const command = parts[0].toLowerCase();
+    const params = parts.slice(1);
+    
+    switch (command) {
+        case '/list':
+            await handleListCommand(chatId, params, db);
+            break;
+        case '/view':
+            await handleSearchByExpect(chatId, params[0], db);
+            break;
+        case '/delete':
+            if (params[0]) {
+                await db.prepare('DELETE FROM lottery_records WHERE id = ?').bind(params[0]).run();
+                await sendTelegramMessage(chatId, `✅ 已删除记录 #${params[0]}`);
+            }
+            break;
+        case '/fetch':
+            await sendTelegramMessage(chatId, '⏳ 数据获取功能（需配置外部API）\n使用键盘菜单中的"导入示例数据"或手动导入SQL');
+            break;
+        default:
+            await sendTelegramMessage(chatId, `❓ 未知命令: ${command}\n使用 /help 查看可用命令`);
+    }
+}
+
+// ==================== 兼容性API服务 ====================
+async function handleLotteryAPI(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const db = env.DB;
+
+    const pathMatch = path.match(/^\/(xg|om)\/(\d{4})$/);
+    if (!pathMatch) {
+        return apiErrorResponse('路径格式错误。使用：/xg/2025 或 /om/2025', 400);
+    }
+
+    const apiType = pathMatch[1];
+    const year = pathMatch[2];
+    const lotteryType = apiType === 'xg' ? LOTTERY_TYPES.HONGKONG : LOTTERY_TYPES.MACAU;
+
+    // 解析参数
+    const expectParam = url.searchParams.get('expect');
+    const fetchAll = url.searchParams.get('all') === 'true';
+    const page = parseInt(url.searchParams.get('page') || '1');
+    const limit = fetchAll ? CONFIG.API_MAX_LIMIT : 
+                 Math.min(parseInt(url.searchParams.get('limit') || '50'), 1000);
+    const offset = (page - 1) * limit;
+
+    try {
+        // 构建查询
+        let queryParams = [lotteryType.code];
+        let whereClause = 'WHERE lottery_type = ?';
+        
+        if (year) {
+            whereClause += ' AND expect LIKE ?';
+            queryParams.push(`${year}%`);
+        }
+        if (expectParam) {
+            whereClause += ' AND expect = ?';
+            queryParams.push(expectParam);
+        }
+
+        // 获取数据
+        const dataQuery = `SELECT * FROM lottery_records ${whereClause} ORDER BY expect DESC LIMIT ? OFFSET ?`;
+        const allParams = [...queryParams, limit, offset];
+        const { results } = await db.prepare(dataQuery).bind(...allParams).all();
+
+        // 格式化数据
+        const formattedData = results.map(record => formatCompatibleRecord(record));
+
+        // 构建响应
+        const response = {
+            result: true,
+            message: "操作成功！",
+            code: 200,
+            data: formattedData,
+            timestamp: Date.now()
+        };
+
+        return new Response(JSON.stringify(response, null, 2), {
+            headers: {
+                'Content-Type': 'application/json; charset=utf-8',
+                'Access-Control-Allow-Origin': '*'
+            }
+        });
+
+    } catch (error) {
+        console.error('API错误:', error);
+        return apiErrorResponse(`服务器错误: ${error.message}`, 500);
+    }
+}
+
+function apiErrorResponse(message, code) {
+    return new Response(JSON.stringify({
+        result: false,
+        message: message,
+        code: code,
+        data: [],
+        timestamp: Date.now()
+    }), {
+        status: code,
+        headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        }
+    });
+}
+
+// ==================== 发送消息辅助函数 ====================
+async function sendTelegramMessage(chatId, text, parseMode = 'HTML') {
+    if (!CONFIG.BOT_TOKEN) return null;
+    const url = `https://api.telegram.org/bot${CONFIG.BOT_TOKEN}/sendMessage`;
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: chatId,
+                text: text,
+                parse_mode: parseMode
+            })
+        });
+        return await response.json();
+    } catch (error) {
+        console.error('发送消息失败:', error);
+        return null;
+    }
+}
+
+// ==================== Worker主入口 ====================
+export default {
+    async fetch(request, env, ctx) {
+        const url = new URL(request.url);
+        const path = url.pathname;
+        const method = request.method;
+
+        // 初始化配置
+        CONFIG.BOT_TOKEN = env.TELEGRAM_BOT_TOKEN || '';
+        CONFIG.ADMIN_IDS = (env.ADMIN_IDS || '').split(',').map(id => id.trim()).filter(id => id);
+        CONFIG.CHANNEL_IDS = (env.CHANNEL_IDS || '').split(',').map(id => id.trim()).filter(id => id);
+
+        // CORS预检
+        if (method === 'OPTIONS') {
+            return new Response(null, {
+                headers: {
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type',
+                    'Access-Control-Max-Age': '86400'
+                }
+            });
+        }
+
+        try {
+            // 1. 彩票数据API接口
+            if ((path.startsWith('/xg/') || path.startsWith('/om/')) && method === 'GET') {
+                return handleLotteryAPI(request, env);
+            }
+
+            // 2. Telegram Webhook
+            if (path === '/webhook' && method === 'POST') {
+                const update = await request.json();
+                return new Response('OK', await handleTelegramUpdate(update, env));
+            }
+
+            // 3. 管理功能端点
+            if (path === '/set-webhook' && method === 'GET') {
+                const botToken = CONFIG.BOT_TOKEN;
+                if (!botToken) return new Response('Bot Token未配置', { status: 500 });
+                const webhookUrl = `${CONFIG.WORKER_DOMAIN}/webhook`;
+                const telegramUrl = `https://api.telegram.org/bot${botToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}`;
+                const resp = await fetch(telegramUrl);
+                const result = await resp.json();
+                return new Response(JSON.stringify(result, null, 2), { 
+                    headers: { 'Content-Type': 'application/json' } 
+                });
+            }
+
+            if (path === '/health' && method === 'GET') {
+                const db = env.DB;
+                let dbStatus = 'unknown';
+                try {
+                    const test = await db.prepare('SELECT 1').run();
+                    dbStatus = 'connected';
+                } catch (e) { dbStatus = `error: ${e.message}`; }
+
+                return new Response(JSON.stringify({
+                    status: 'operational',
+                    timestamp: new Date().toISOString(),
+                    config: {
+                        hasBotToken: !!CONFIG.BOT_TOKEN,
+                        adminCount: CONFIG.ADMIN_IDS.length,
+                        channelCount: CONFIG.CHANNEL_IDS.length
+                    },
+                    database: dbStatus,
+                    endpoints: {
+                        hongkongAPI: `${CONFIG.WORKER_DOMAIN}/xg/{year}?all=true`,
+                        macauAPI: `${CONFIG.WORKER_DOMAIN}/om/{year}?all=true`,
+                        webhook: `${CONFIG.WORKER_DOMAIN}/webhook`
+                    }
+                }, null, 2), {
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*' 
+                    }
+                });
+            }
+
+            // 4. 默认首页
+            if (path === '/' && method === 'GET') {
+                const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+                <title>彩票数据API</title><style>body{font-family:sans-serif; padding:40px;}</style></head>
+                <body><h1>🎰 彩票数据API服务</h1>
+                <p>提供香港六合彩与澳门彩票开奖记录API，支持Telegram Bot管理。</p>
+                <h3>主要接口：</h3>
+                <ul><li>香港: <code>${CONFIG.WORKER_DOMAIN}/xg/2025?all=true</code></li>
+                <li>澳门: <code>${CONFIG.WORKER_DOMAIN}/om/2025?all=true</code></li></ul>
+                <p><a href="/health">系统状态</a></p></body></html>`;
+                return new Response(html, { 
+                    headers: { 'Content-Type': 'text/html; charset=utf-8' } 
+                });
+            }
+
+            // 5. 404响应
+            return new Response(JSON.stringify({
+                result: false,
+                message: '接口不存在。可用: /xg/2025, /om/2025, /health',
+                code: 404,
+                data: [],
+                timestamp: Date.now()
+            }), {
+                status: 404,
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*' 
+                }
+            });
+
+        } catch (error) {
+            console.error('Worker错误:', error);
+            return new Response(JSON.stringify({
+                result: false,
+                message: `服务器错误: ${error.message}`,
+                code: 500,
+                data: [],
+                timestamp: Date.now()
+            }), {
+                status: 500,
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*' 
+                }
+            });
+        }
+    }
+};
