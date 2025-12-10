@@ -1,0 +1,1521 @@
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+    const method = request.method;
+    
+    console.log(`[${new Date().toISOString()}] ${method} ${pathname}`);
+    
+    // 处理 CORS 预检请求
+    if (method === 'OPTIONS') {
+      return handleCORS();
+    }
+    
+    // 路由匹配
+    const routes = {
+      // 初始化和管理
+      'GET:/init-db': () => handleInitDB(env),
+      'GET:/test-db': () => testDBConnection(env),
+      'GET:/health': () => handleHealthCheck(env),
+      'GET:/status': () => handleHealthCheck(env),
+      'GET:/test': () => handleTest(),
+      'GET:/ping': () => handleTest(),
+      
+      // Telegram Webhook
+      'POST:/telegram-webhook': () => handleTelegramWebhook(request, env),
+      
+      // 历史数据 API - 按类型和年份
+      // GET /xg/2025 - 香港六合彩2025年数据
+      // GET /om/2025 - 老澳21:30 2025年数据
+      // 支持正则路由匹配
+      'GET:/xg': () => handleLotteryData(env, 'xg', url),
+      'GET:/om': () => handleLotteryData(env, 'om', url),
+      'GET:/xg/:year': (params) => handleLotteryData(env, 'xg', url, params.year),
+      'GET:/om/:year': (params) => handleLotteryData(env, 'om', url, params.year),
+      
+      // 管理员接口
+      'POST:/admin/import': () => handleAdminImport(request, env),
+      'GET:/admin/records': () => handleListRecords(request, env),
+      'GET:/admin/record/:expect': (params) => handleGetRecord(request, env, params),
+      'PUT:/admin/record/:expect': (params) => handleUpdateRecord(request, env, params),
+      'DELETE:/admin/record/:expect': (params) => handleDeleteRecord(request, env, params),
+      'GET:/admin/stats': () => handleAdminStats(env),
+      'POST:/admin/batch-delete': () => handleBatchDelete(request, env),
+    };
+    
+    // 动态路由匹配
+    for (const [routePattern, handler] of Object.entries(routes)) {
+      const [routeMethod, routePath] = routePattern.split(':');
+      
+      if (method === routeMethod) {
+        const match = matchRoute(routePath, pathname);
+        if (match) {
+          return await handler(match.params);
+        }
+      }
+    }
+    
+    // 处理动态彩票类型路由
+    const dynamicMatch = pathname.match(/^\/([a-z]+)\/(\d{4})$/);
+    if (dynamicMatch && method === 'GET') {
+      const [, type, year] = dynamicMatch;
+      return await handleLotteryData(env, type, url, year);
+    }
+    
+    // 处理动态彩票类型根路由（获取最新数据）
+    const typeMatch = pathname.match(/^\/([a-z]+)$/);
+    if (typeMatch && method === 'GET') {
+      const [, type] = typeMatch;
+      return await handleLotteryData(env, type, url);
+    }
+    
+    // 根路径返回 API 文档
+    return handleAPIDocs();
+  }
+};
+
+// ==================== 路由匹配函数 ====================
+function matchRoute(routePath, requestPath) {
+  const routeParts = routePath.split('/').filter(Boolean);
+  const requestParts = requestPath.split('/').filter(Boolean);
+  
+  if (routeParts.length !== requestParts.length) {
+    return null;
+  }
+  
+  const params = {};
+  
+  for (let i = 0; i < routeParts.length; i++) {
+    const routePart = routeParts[i];
+    const requestPart = requestParts[i];
+    
+    if (routePart.startsWith(':')) {
+      const paramName = routePart.slice(1);
+      params[paramName] = requestPart;
+    } else if (routePart !== requestPart) {
+      return null;
+    }
+  }
+  
+  return { params };
+}
+
+// ==================== 彩票类型配置 ====================
+const LOTTERY_CONFIG = {
+  // 香港六合彩
+  xg: {
+    name: '香港六合彩',
+    displayName: '香港六合彩',
+    pattern: '香港六合彩第:',
+    description: '香港六合彩开奖记录',
+    defaultInfo: '香港赛马会官方开奖'
+  },
+  
+  // 老澳21:30
+  om: {
+    name: '老澳21.30',
+    displayName: '老澳21:30',
+    pattern: '老澳21.30第:',
+    description: '老澳21:30开奖记录',
+    defaultInfo: '澳门彩票有限公司'
+  }
+  
+  // 可以在这里添加更多彩票类型
+  // ajc: { name: '澳基會', pattern: '澳基會第:' },
+  // twbg: { name: '台灣賓果', pattern: '台灣賓果第:' }
+};
+
+// ==================== 工具函数 ====================
+function handleCORS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, Authorization, X-Lottery-Type',
+      'Access-Control-Max-Age': '86400'
+    }
+  });
+}
+
+function jsonResponse(data, status = 200, headers = {}) {
+  const defaultHeaders = {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'public, max-age=300'
+  };
+  
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: { ...defaultHeaders, ...headers }
+  });
+}
+
+function validateApiKey(request, env) {
+  const apiKey = request.headers.get('X-API-Key');
+  
+  if (!env.ADMIN_API_KEY) {
+    return { valid: false, message: '服务器未配置API密钥' };
+  }
+  if (!apiKey) {
+    return { valid: false, message: '缺少API密钥' };
+  }
+  if (apiKey !== env.ADMIN_API_KEY) {
+    return { valid: false, message: '无效的API密钥' };
+  }
+  
+  return { valid: true };
+}
+
+// ==================== API 文档 ====================
+function handleAPIDocs() {
+  const currentYear = new Date().getFullYear();
+  
+  return jsonResponse({
+    result: true,
+    message: '彩票开奖记录 API - 按类型分类存储',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      // 公开API
+      health_check: '/health (GET, 健康检查)',
+      test: '/test (GET, 测试Worker)',
+      
+      // 彩票数据API
+      hk_lottery: `/xg/${currentYear} (GET, 香港六合彩${currentYear}年数据)`,
+      macau_lottery: `/om/${currentYear} (GET, 老澳21:30 ${currentYear}年数据)`,
+      lottery_by_type: '/{type}/{year} (GET, 按类型和年份获取数据)',
+      latest_data: '/{type} (GET, 获取指定类型的最新数据)',
+      
+      // 管理员API
+      admin_import: '/admin/import (POST, 需要API密钥)',
+      admin_list: '/admin/records (GET, 需要API密钥)',
+      admin_stats: '/admin/stats (GET, 需要API密钥)',
+      admin_get: '/admin/record/{expect} (GET, 需要API密钥)',
+      admin_update: '/admin/record/{expect} (PUT, 需要API密钥)',
+      admin_delete: '/admin/record/{expect} (DELETE, 需要API密钥)',
+      admin_batch_delete: '/admin/batch-delete (POST, 需要API密钥)'
+    },
+    available_types: Object.entries(LOTTERY_CONFIG).map(([code, config]) => ({
+      code,
+      name: config.displayName,
+      pattern: config.pattern,
+      example: `/${code}/${currentYear}`
+    })),
+    examples: {
+      hk_2025: '/xg/2025',
+      macau_2025: '/om/2025',
+      latest_hk: '/xg',
+      latest_macau: '/om'
+    }
+  });
+}
+
+function handleTest() {
+  return jsonResponse({
+    status: 'ok',
+    message: 'Worker is running',
+    timestamp: new Date().toISOString()
+  });
+}
+
+// ==================== 数据库初始化 ====================
+async function handleInitDB(env) {
+  console.log('开始初始化数据库...');
+  
+  try {
+    if (!env.DB) {
+      return jsonResponse({
+        result: false,
+        message: '数据库绑定不存在',
+        solution: '请在Worker设置中添加DB变量绑定到D1数据库'
+      }, 500);
+    }
+    
+    // 检查表是否已存在
+    const existingTable = await env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='lottery_records'"
+    ).first();
+    
+    if (existingTable) {
+      console.log('表已存在，检查表结构...');
+      
+      // 检查是否有 lottery_type 字段
+      const tableInfo = await env.DB.prepare('PRAGMA table_info(lottery_records)').all();
+      const hasTypeField = tableInfo.results.some(col => col.name === 'lottery_type');
+      
+      if (!hasTypeField) {
+        console.log('添加 lottery_type 字段...');
+        await env.DB.prepare('ALTER TABLE lottery_records ADD COLUMN lottery_type TEXT DEFAULT \'unknown\'').run();
+      }
+      
+      return jsonResponse({
+        result: true,
+        message: '表已存在，表结构已更新',
+        existing: true
+      });
+    }
+    
+    // 创建新表
+    const createTableSQL = `
+      CREATE TABLE lottery_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        expect TEXT NOT NULL,
+        lottery_type TEXT NOT NULL,
+        open_time TEXT NOT NULL,
+        open_code TEXT NOT NULL,
+        zodiac TEXT,
+        emojis TEXT,
+        verify INTEGER DEFAULT 0,
+        info TEXT,
+        source_message TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(expect, lottery_type)
+      )
+    `;
+    
+    console.log('创建表...');
+    await env.DB.prepare(createTableSQL).run();
+    
+    // 创建索引
+    const indexes = [
+      'CREATE INDEX idx_lottery_type ON lottery_records(lottery_type)',
+      'CREATE INDEX idx_expect ON lottery_records(expect)',
+      'CREATE INDEX idx_open_time ON lottery_records(open_time)',
+      'CREATE INDEX idx_type_expect ON lottery_records(lottery_type, expect)',
+      'CREATE INDEX idx_type_year ON lottery_records(lottery_type, strftime(\'%Y\', open_time))'
+    ];
+    
+    for (const sql of indexes) {
+      try {
+        await env.DB.prepare(sql).run();
+      } catch (error) {
+        console.warn(`创建索引失败: ${error.message}`);
+      }
+    }
+    
+    // 插入测试数据
+    const testTypes = Object.keys(LOTTERY_CONFIG);
+    for (const type of testTypes) {
+      try {
+        const testData = {
+          expect: `TEST${Date.now().toString().slice(-6)}`,
+          lottery_type: type,
+          open_time: new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ''),
+          open_code: '01,02,03,04,05,06,07',
+          zodiac: '鼠,牛,虎,兔,龍,蛇,馬',
+          info: LOTTERY_CONFIG[type].defaultInfo || '测试数据'
+        };
+        
+        await env.DB.prepare(`
+          INSERT INTO lottery_records (expect, lottery_type, open_time, open_code, zodiac, info)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).bind(
+          testData.expect,
+          testData.lottery_type,
+          testData.open_time,
+          testData.open_code,
+          testData.zodiac,
+          testData.info
+        ).run();
+      } catch (error) {
+        console.warn(`插入${type}测试数据失败:`, error.message);
+      }
+    }
+    
+    return jsonResponse({
+      result: true,
+      message: '数据库初始化完成',
+      tables: ['lottery_records'],
+      indexes: indexes.length,
+      test_data: testTypes
+    });
+    
+  } catch (error) {
+    console.error('数据库初始化失败:', error);
+    return jsonResponse({
+      result: false,
+      message: '数据库初始化失败',
+      error: error.message
+    }, 500);
+  }
+}
+
+// ==================== 健康检查 ====================
+async function handleHealthCheck(env) {
+  try {
+    let dbStatus = 'unknown';
+    let dbError = null;
+    let tableCount = 0;
+    
+    if (env.DB) {
+      try {
+        const result = await env.DB.prepare('SELECT 1 as test').first();
+        dbStatus = result ? 'connected' : 'error';
+        
+        // 获取表信息
+        const tables = await env.DB.prepare(
+          "SELECT name FROM sqlite_master WHERE type='table'"
+        ).all();
+        tableCount = tables.results ? tables.results.length : 0;
+        
+      } catch (error) {
+        dbStatus = 'error';
+        dbError = error.message;
+      }
+    } else {
+      dbStatus = 'no-binding';
+    }
+    
+    return jsonResponse({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      services: {
+        worker: 'running',
+        database: dbStatus,
+        telegram: env.TELEGRAM_BOT_TOKEN ? 'configured' : 'not-configured'
+      },
+      statistics: {
+        tables: tableCount,
+        lottery_types: Object.keys(LOTTERY_CONFIG).length
+      },
+      environment: {
+        hasDB: !!env.DB,
+        hasTelegramToken: !!env.TELEGRAM_BOT_TOKEN,
+        hasAdminId: !!env.TELEGRAM_ADMIN_ID,
+        hasApiKey: !!env.ADMIN_API_KEY
+      },
+      error: dbError
+    });
+  } catch (error) {
+    return jsonResponse({
+      status: 'error',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    }, 500);
+  }
+}
+
+// ==================== 数据库连接测试 ====================
+async function testDBConnection(env) {
+  try {
+    if (!env.DB) {
+      return jsonResponse({
+        result: false,
+        message: '数据库绑定不存在'
+      }, 500);
+    }
+    
+    // 测试基本查询
+    const test1 = await env.DB.prepare('SELECT 1 as test_value').first();
+    
+    // 获取所有表
+    const tablesResult = await env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    ).all();
+    
+    // 检查彩票记录表结构
+    let tableStructure = null;
+    if (tablesResult.results.some(t => t.name === 'lottery_records')) {
+      tableStructure = await env.DB.prepare('PRAGMA table_info(lottery_records)').all();
+    }
+    
+    // 统计各类型数据量
+    let typeStats = [];
+    if (tableStructure) {
+      try {
+        const statsResult = await env.DB.prepare(`
+          SELECT lottery_type, COUNT(*) as count 
+          FROM lottery_records 
+          GROUP BY lottery_type 
+          ORDER BY count DESC
+        `).all();
+        
+        typeStats = statsResult.results || [];
+      } catch (error) {
+        console.warn('获取类型统计失败:', error.message);
+      }
+    }
+    
+    return jsonResponse({
+      result: true,
+      message: '数据库连接测试完成',
+      database: {
+        basic_query: test1 ? '成功' : '失败',
+        tables: tablesResult.results ? tablesResult.results.map(t => t.name) : [],
+        lottery_table_structure: tableStructure ? tableStructure.results : null
+      },
+      statistics: {
+        by_type: typeStats,
+        total_records: typeStats.reduce((sum, stat) => sum + stat.count, 0)
+      },
+      supported_types: Object.keys(LOTTERY_CONFIG)
+    });
+  } catch (error) {
+    console.error('数据库连接测试失败:', error);
+    return jsonResponse({
+      result: false,
+      message: '数据库连接测试失败',
+      error: error.message
+    }, 500);
+  }
+}
+
+// ==================== Telegram Webhook 处理 ====================
+async function handleTelegramWebhook(request, env) {
+  try {
+    const update = await request.json();
+    console.log('收到Telegram消息:', JSON.stringify(update, null, 2));
+    
+    // 处理频道消息
+    if (update.channel_post) {
+      const message = update.channel_post;
+      await processLotteryMessage(message, env);
+    }
+    
+    // 处理管理员私聊
+    if (update.message && update.message.from.id.toString() === env.TELEGRAM_ADMIN_ID) {
+      await processAdminMessage(update.message, env);
+    }
+    
+    return new Response('OK');
+  } catch (error) {
+    console.error('Telegram webhook错误:', error);
+    return new Response('Error', { status: 500 });
+  }
+}
+
+async function processLotteryMessage(message, env) {
+  try {
+    const text = message.text || '';
+    const messageId = message.message_id;
+    
+    console.log(`处理消息 #${messageId}:`, text.substring(0, 100) + '...');
+    
+    const lines = text.split('\n').map(line => line.trim()).filter(line => line);
+    
+    if (lines.length < 3) {
+      console.log('消息格式无效');
+      return;
+    }
+    
+    // 识别彩票类型
+    const firstLine = lines[0];
+    let lotteryType = null;
+    
+    for (const [typeCode, config] of Object.entries(LOTTERY_CONFIG)) {
+      if (firstLine.includes(config.pattern)) {
+        lotteryType = typeCode;
+        break;
+      }
+    }
+    
+    if (!lotteryType) {
+      console.log('未知的彩票类型，跳过处理');
+      return;
+    }
+    
+    console.log(`识别到彩票类型: ${lotteryType} (${LOTTERY_CONFIG[lotteryType].displayName})`);
+    
+    // 解析期号 - 支持不同格式
+    let expect = null;
+    const expectMatch = firstLine.match(/:?(\d{6,7})期/);
+    if (expectMatch) {
+      expect = expectMatch[1];
+    } else {
+      // 尝试其他格式
+      const altMatch = firstLine.match(/\d{6,7}/);
+      if (altMatch) {
+        expect = altMatch[0];
+      }
+    }
+    
+    if (!expect) {
+      console.log('未找到期号');
+      return;
+    }
+    
+    console.log('期号:', expect);
+    
+    // 解析开奖号码（第二行）
+    const numbersLine = lines[1];
+    const numbers = numbersLine.trim().split(/\s+/).map(num => {
+      return num.padStart(2, '0');
+    });
+    
+    if (numbers.length < 6 || numbers.length > 7) {
+      console.log('号码数量无效:', numbers.length);
+      return;
+    }
+    
+    const openCode = numbers.join(',');
+    console.log('开奖号码:', openCode);
+    
+    // 解析生肖（第三行）
+    const zodiacLine = lines[2];
+    const zodiacs = zodiacLine.trim().split(/\s+/);
+    const zodiac = zodiacs.join(',');
+    console.log('生肖:', zodiac);
+    
+    // 解析表情符号（第四行，如果有）
+    let emojis = null;
+    if (lines.length >= 4) {
+      const emojiLine = lines[3];
+      emojis = emojiLine.trim().replace(/\s+/g, ',');
+    }
+    
+    // 检查是否已存在
+    const existing = await env.DB.prepare(
+      'SELECT id FROM lottery_records WHERE expect = ? AND lottery_type = ?'
+    ).bind(expect, lotteryType).first();
+    
+    if (existing) {
+      console.log('记录已存在:', lotteryType, expect);
+      return;
+    }
+    
+    // 开奖时间
+    const openTime = new Date(message.date * 1000).toISOString()
+      .replace('T', ' ')
+      .replace(/\.\d{3}Z$/, '');
+    
+    // 获取彩票配置
+    const config = LOTTERY_CONFIG[lotteryType];
+    
+    // 插入数据库
+    await env.DB.prepare(`
+      INSERT INTO lottery_records 
+      (expect, lottery_type, open_time, open_code, zodiac, emojis, verify, info, source_message)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      expect,
+      lotteryType,
+      openTime,
+      openCode,
+      zodiac,
+      emojis,
+      0,
+      config.defaultInfo || 'macaujc.com 接口數據來源、邮件技術支持：service@macaujc.com',
+      text.substring(0, 500) // 保存原始消息前500字符
+    ).run();
+    
+    console.log(`记录保存成功: ${lotteryType} - ${expect}`);
+    
+    // 发送确认消息给管理员
+    if (env.TELEGRAM_ADMIN_ID && env.TELEGRAM_BOT_TOKEN) {
+      const botResponse = `✅ 保存开奖记录成功\n类型：${config.displayName}\n期号：${expect}\n号码：${openCode}\n时间：${openTime}`;
+      await sendTelegramMessage(env.TELEGRAM_ADMIN_ID, botResponse, env.TELEGRAM_BOT_TOKEN);
+    }
+    
+  } catch (error) {
+    console.error('处理彩票消息错误:', error);
+  }
+}
+
+async function processAdminMessage(message, env) {
+  const text = message.text.trim();
+  const chatId = message.chat.id;
+  
+  const commands = {
+    '/start': `🎰 彩票开奖记录管理 Bot\n\n支持的类型:\n${Object.entries(LOTTERY_CONFIG).map(([code, config]) => `  /${code} - ${config.displayName}`).join('\n')}\n\n可用命令:\n/list - 查看最新记录\n/stats - 统计数据\n/types - 查看支持的彩票类型\n/delete [类型] [期号] - 删除记录\n/help - 帮助信息`,
+    
+    '/xg': async () => await getLatestRecords(env, 'xg', chatId),
+    '/om': async () => await getLatestRecords(env, 'om', chatId),
+    
+    '/types': () => {
+      let response = '📋 支持的彩票类型:\n\n';
+      for (const [code, config] of Object.entries(LOTTERY_CONFIG)) {
+        response += `/${code} - ${config.displayName}\n`;
+        response += `  格式: ${config.pattern}...\n\n`;
+      }
+      return response;
+    },
+    
+    '/list': async () => {
+      try {
+        const records = await env.DB.prepare(`
+          SELECT lottery_type, expect, open_time, open_code 
+          FROM lottery_records 
+          ORDER BY open_time DESC 
+          LIMIT 10
+        `).all();
+        
+        if (!records.results || records.results.length === 0) {
+          return '暂无开奖记录';
+        }
+        
+        let response = '📋 最新10期开奖记录:\n\n';
+        records.results.forEach((record, index) => {
+          const typeName = LOTTERY_CONFIG[record.lottery_type]?.displayName || record.lottery_type;
+          response += `${index + 1}. ${typeName}\n`;
+          response += `   期号：${record.expect}\n`;
+          response += `   时间：${record.open_time}\n`;
+          response += `   号码：${record.open_code}\n\n`;
+        });
+        
+        return response;
+      } catch (error) {
+        return `❌ 获取记录失败: ${error.message}`;
+      }
+    },
+    
+    '/stats': async () => {
+      try {
+        // 获取总体统计
+        const total = await env.DB.prepare('SELECT COUNT(*) as count FROM lottery_records').first();
+        
+        // 按类型统计
+        const byType = await env.DB.prepare(`
+          SELECT lottery_type, COUNT(*) as count 
+          FROM lottery_records 
+          GROUP BY lottery_type 
+          ORDER BY count DESC
+        `).all();
+        
+        // 按年份统计
+        const byYear = await env.DB.prepare(`
+          SELECT 
+            lottery_type,
+            strftime('%Y', open_time) as year,
+            COUNT(*) as count
+          FROM lottery_records 
+          GROUP BY lottery_type, year
+          ORDER BY lottery_type, year DESC
+        `).all();
+        
+        // 最新记录
+        const latest = await env.DB.prepare(`
+          SELECT lottery_type, expect, open_time 
+          FROM lottery_records 
+          ORDER BY open_time DESC 
+          LIMIT 3
+        `).all();
+        
+        let response = '📊 数据统计\n\n';
+        response += `总记录数：${total ? total.count : 0}\n\n`;
+        
+        if (byType.results && byType.results.length > 0) {
+          response += '按类型统计:\n';
+          byType.results.forEach(stat => {
+            const typeName = LOTTERY_CONFIG[stat.lottery_type]?.displayName || stat.lottery_type;
+            response += `  ${typeName}: ${stat.count}期\n`;
+          });
+          response += '\n';
+        }
+        
+        if (byYear.results && byYear.results.length > 0) {
+          response += '按年份统计:\n';
+          let currentType = '';
+          byYear.results.forEach(stat => {
+            if (stat.lottery_type !== currentType) {
+              currentType = stat.lottery_type;
+              const typeName = LOTTERY_CONFIG[currentType]?.displayName || currentType;
+              response += `  ${typeName}:\n`;
+            }
+            response += `    ${stat.year}年: ${stat.count}期\n`;
+          });
+        }
+        
+        if (latest.results && latest.results.length > 0) {
+          response += '\n最新开奖:\n';
+          latest.results.forEach((record, index) => {
+            const typeName = LOTTERY_CONFIG[record.lottery_type]?.displayName || record.lottery_type;
+            response += `  ${index + 1}. ${typeName} ${record.expect}期\n`;
+          });
+        }
+        
+        return response;
+      } catch (error) {
+        return `❌ 获取统计失败: ${error.message}`;
+      }
+    },
+    
+    '/delete': async (args) => {
+      if (!args || args.length < 2) {
+        return '请提供彩票类型和期号，例如: /delete xg 2025127';
+      }
+      
+      const [type, expect] = args;
+      
+      if (!LOTTERY_CONFIG[type]) {
+        return `❌ 未知的彩票类型: ${type}`;
+      }
+      
+      try {
+        // 检查记录是否存在
+        const record = await env.DB.prepare(
+          'SELECT id FROM lottery_records WHERE lottery_type = ? AND expect = ?'
+        ).bind(type, expect).first();
+        
+        if (!record) {
+          return `❌ 找不到 ${LOTTERY_CONFIG[type].displayName} 期号为 ${expect} 的记录`;
+        }
+        
+        // 删除记录
+        const result = await env.DB.prepare(
+          'DELETE FROM lottery_records WHERE lottery_type = ? AND expect = ?'
+        ).bind(type, expect).run();
+        
+        if (result.success) {
+          return `✅ 成功删除 ${LOTTERY_CONFIG[type].displayName} 期号 ${expect} 的记录`;
+        } else {
+          return `❌ 删除记录失败`;
+        }
+      } catch (error) {
+        return `❌ 删除记录时出错: ${error.message}`;
+      }
+    },
+    
+    '/help': `🎰 可用命令:\n\n📊 数据查看:\n/list - 查看最新记录\n/stats - 统计数据\n/types - 查看支持的彩票类型\n/xg - 查看香港六合彩最新记录\n/om - 查看老澳21:30最新记录\n\n🔧 管理操作:\n/delete [类型] [期号] - 删除记录\n\n📱 Web API:\n/${Object.keys(LOTTERY_CONFIG).map(code => `${code}/2025`).join('\n/')}`
+  };
+  
+  // 查找匹配的命令
+  for (const [command, handler] of Object.entries(commands)) {
+    if (text.startsWith(command)) {
+      try {
+        let response;
+        const args = text.substring(command.length).trim().split(/\s+/);
+        
+        if (typeof handler === 'function') {
+          response = await handler(args);
+        } else {
+          response = handler;
+        }
+        
+        await sendTelegramMessage(chatId, response, env.TELEGRAM_BOT_TOKEN);
+      } catch (error) {
+        console.error('命令执行错误:', error);
+        await sendTelegramMessage(chatId, '命令执行出错: ' + error.message, env.TELEGRAM_BOT_TOKEN);
+      }
+      break;
+    }
+  }
+}
+
+async function getLatestRecords(env, type, chatId) {
+  try {
+    if (!LOTTERY_CONFIG[type]) {
+      return `❌ 未知的彩票类型: ${type}`;
+    }
+    
+    const records = await env.DB.prepare(`
+      SELECT expect, open_time, open_code 
+      FROM lottery_records 
+      WHERE lottery_type = ? 
+      ORDER BY open_time DESC 
+      LIMIT 5
+    `).bind(type).all();
+    
+    if (!records.results || records.results.length === 0) {
+      return `${LOTTERY_CONFIG[type].displayName} 暂无开奖记录`;
+    }
+    
+    let response = `📋 ${LOTTERY_CONFIG[type].displayName} 最新5期:\n\n`;
+    records.results.forEach((record, index) => {
+      response += `${index + 1}. 期号：${record.expect}\n`;
+      response += `   时间：${record.open_time}\n`;
+      response += `   号码：${record.open_code}\n\n`;
+    });
+    
+    return response;
+  } catch (error) {
+    return `❌ 获取记录失败: ${error.message}`;
+  }
+}
+
+// ==================== 彩票数据API ====================
+async function handleLotteryData(env, type, url, year = null) {
+  try {
+    // 验证彩票类型
+    if (!LOTTERY_CONFIG[type]) {
+      return jsonResponse({
+        result: false,
+        message: '不支持的彩票类型',
+        supported_types: Object.keys(LOTTERY_CONFIG)
+      }, 400);
+    }
+    
+    const config = LOTTERY_CONFIG[type];
+    
+    // 构建查询
+    let query;
+    let params = [type];
+    
+    if (year) {
+      // 验证年份格式
+      if (!/^\d{4}$/.test(year)) {
+        return jsonResponse({
+          result: false,
+          message: '年份格式错误，应为4位数字'
+        }, 400);
+      }
+      
+      query = `
+        SELECT 
+          expect,
+          open_time as openTime,
+          open_code as openCode,
+          zodiac,
+          emojis,
+          verify,
+          info
+        FROM lottery_records 
+        WHERE lottery_type = ? AND strftime('%Y', open_time) = ?
+        ORDER BY expect DESC
+      `;
+      params.push(year);
+    } else {
+      // 获取最新数据（默认最近30条）
+      query = `
+        SELECT 
+          expect,
+          open_time as openTime,
+          open_code as openCode,
+          zodiac,
+          emojis,
+          verify,
+          info
+        FROM lottery_records 
+        WHERE lottery_type = ?
+        ORDER BY expect DESC
+        LIMIT 30
+      `;
+    }
+    
+    const records = await env.DB.prepare(query).bind(...params).all();
+    
+    // 格式化返回数据
+    const formattedData = (records.results || []).map(record => ({
+      expect: record.expect,
+      openTime: record.openTime,
+      type: type,
+      openCode: record.openCode,
+      zodiac: record.zodiac || '',
+      emojis: record.emojis || '',
+      verify: record.verify || 0,
+      info: record.info || config.defaultInfo || 'macaujc.com 接口數據來源、邮件技術支持：service@macaujc.com'
+    }));
+    
+    return jsonResponse({
+      result: true,
+      message: `${config.displayName} ${year ? year + '年' : '最新'}开奖记录`,
+      code: 200,
+      data: formattedData,
+      metadata: {
+        type: type,
+        name: config.displayName,
+        year: year,
+        count: formattedData.length,
+        timestamp: Date.now()
+      }
+    });
+    
+  } catch (error) {
+    console.error('彩票数据API错误:', error);
+    return jsonResponse({
+      result: false,
+      message: '服务器内部错误',
+      code: 500,
+      error: error.message
+    }, 500);
+  }
+}
+
+// ==================== 管理员接口 ====================
+async function handleAdminImport(request, env) {
+  try {
+    // 验证 API 密钥
+    const validation = validateApiKey(request, env);
+    if (!validation.valid) {
+      return jsonResponse({
+        result: false,
+        message: validation.message,
+        code: 401
+      }, 401);
+    }
+    
+    const data = await request.json();
+    
+    if (!Array.isArray(data)) {
+      return jsonResponse({
+        result: false,
+        message: '数据格式错误，应为数组',
+        code: 400
+      }, 400);
+    }
+    
+    let successCount = 0;
+    let errorCount = 0;
+    const errors = [];
+    
+    for (const record of data) {
+      try {
+        // 验证必要字段
+        if (!record.expect || !record.openCode || !record.lottery_type) {
+          errorCount++;
+          errors.push(`记录缺少必要字段: ${JSON.stringify(record)}`);
+          continue;
+        }
+        
+        // 验证彩票类型
+        if (!LOTTERY_CONFIG[record.lottery_type]) {
+          errorCount++;
+          errors.push(`未知的彩票类型: ${record.lottery_type}`);
+          continue;
+        }
+        
+        await env.DB.prepare(`
+          INSERT OR REPLACE INTO lottery_records 
+          (expect, lottery_type, open_time, open_code, zodiac, emojis, verify, info)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          record.expect,
+          record.lottery_type,
+          record.open_time || new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ''),
+          record.openCode,
+          record.zodiac || '',
+          record.emojis || '',
+          record.verify ? 1 : 0,
+          record.info || LOTTERY_CONFIG[record.lottery_type].defaultInfo
+        ).run();
+        
+        successCount++;
+      } catch (error) {
+        errorCount++;
+        errors.push(`${record.lottery_type} ${record.expect}: ${error.message}`);
+      }
+    }
+    
+    return jsonResponse({
+      result: true,
+      message: `数据导入完成，成功：${successCount}，失败：${errorCount}`,
+      code: 200,
+      summary: {
+        total: data.length,
+        success: successCount,
+        error: errorCount
+      },
+      errors: errors.length > 0 ? errors : undefined
+    });
+    
+  } catch (error) {
+    console.error('导入API错误:', error);
+    return jsonResponse({
+      result: false,
+      message: '导入失败',
+      code: 500,
+      error: error.message
+    }, 500);
+  }
+}
+
+async function handleListRecords(request, env) {
+  try {
+    const validation = validateApiKey(request, env);
+    if (!validation.valid) {
+      return jsonResponse({
+        result: false,
+        message: validation.message,
+        code: 401
+      }, 401);
+    }
+    
+    const url = new URL(request.url);
+    const page = parseInt(url.searchParams.get('page') || '1');
+    const limit = parseInt(url.searchParams.get('limit') || '20');
+    const type = url.searchParams.get('type');
+    const year = url.searchParams.get('year');
+    const offset = (page - 1) * limit;
+    
+    // 构建查询条件
+    let whereClause = '1=1';
+    const params = [];
+    
+    if (type) {
+      whereClause += ' AND lottery_type = ?';
+      params.push(type);
+    }
+    
+    if (year) {
+      whereClause += ' AND strftime(\'%Y\', open_time) = ?';
+      params.push(year);
+    }
+    
+    // 获取总记录数
+    const countQuery = `SELECT COUNT(*) as total FROM lottery_records WHERE ${whereClause}`;
+    const countResult = await env.DB.prepare(countQuery).bind(...params).first();
+    const total = countResult ? countResult.total : 0;
+    
+    // 获取记录
+    params.push(limit, offset);
+    const records = await env.DB.prepare(`
+      SELECT 
+        id,
+        expect,
+        lottery_type,
+        strftime('%Y-%m-%d %H:%M:%S', open_time) as open_time,
+        open_code,
+        zodiac,
+        emojis,
+        verify,
+        info,
+        strftime('%Y-%m-%d %H:%M:%S', created_at) as created_at,
+        strftime('%Y-%m-%d %H:%M:%S', updated_at) as updated_at
+      FROM lottery_records 
+      WHERE ${whereClause}
+      ORDER BY open_time DESC
+      LIMIT ? OFFSET ?
+    `).bind(...params).all();
+    
+    return jsonResponse({
+      result: true,
+      message: '获取记录列表成功',
+      code: 200,
+      data: {
+        records: records.results || [],
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
+        },
+        filters: {
+          type,
+          year
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('获取记录列表错误:', error);
+    return jsonResponse({
+      result: false,
+      message: '获取记录列表失败',
+      code: 500,
+      error: error.message
+    }, 500);
+  }
+}
+
+async function handleGetRecord(request, env, params) {
+  try {
+    const validation = validateApiKey(request, env);
+    if (!validation.valid) {
+      return jsonResponse({
+        result: false,
+        message: validation.message,
+        code: 401
+      }, 401);
+    }
+    
+    const expect = params.expect;
+    
+    if (!expect) {
+      return jsonResponse({
+        result: false,
+        message: '请提供期号',
+        code: 400
+      }, 400);
+    }
+    
+    // 查询记录
+    const record = await env.DB.prepare(`
+      SELECT 
+        id,
+        expect,
+        lottery_type,
+        strftime('%Y-%m-%d %H:%M:%S', open_time) as open_time,
+        open_code,
+        zodiac,
+        emojis,
+        verify,
+        info,
+        source_message,
+        strftime('%Y-%m-%d %H:%M:%S', created_at) as created_at,
+        strftime('%Y-%m-%d %H:%M:%S', updated_at) as updated_at
+      FROM lottery_records 
+      WHERE expect = ?
+    `).bind(expect).first();
+    
+    if (!record) {
+      return jsonResponse({
+        result: false,
+        message: `找不到期号为 ${expect} 的记录`,
+        code: 404
+      }, 404);
+    }
+    
+    return jsonResponse({
+      result: true,
+      message: '获取记录成功',
+      code: 200,
+      data: record
+    });
+    
+  } catch (error) {
+    console.error('获取记录错误:', error);
+    return jsonResponse({
+      result: false,
+      message: '获取记录失败',
+      code: 500,
+      error: error.message
+    }, 500);
+  }
+}
+
+async function handleUpdateRecord(request, env, params) {
+  try {
+    const validation = validateApiKey(request, env);
+    if (!validation.valid) {
+      return jsonResponse({
+        result: false,
+        message: validation.message,
+        code: 401
+      }, 401);
+    }
+    
+    const expect = params.expect;
+    
+    if (!expect) {
+      return jsonResponse({
+        result: false,
+        message: '请提供期号',
+        code: 400
+      }, 400);
+    }
+    
+    const data = await request.json();
+    
+    // 检查记录是否存在
+    const existing = await env.DB.prepare(
+      'SELECT id, lottery_type FROM lottery_records WHERE expect = ?'
+    ).bind(expect).first();
+    
+    if (!existing) {
+      return jsonResponse({
+        result: false,
+        message: `找不到期号为 ${expect} 的记录`,
+        code: 404
+      }, 404);
+    }
+    
+    // 构建更新字段
+    const updates = [];
+    const values = [];
+    
+    if (data.lottery_type !== undefined) {
+      if (!LOTTERY_CONFIG[data.lottery_type]) {
+        return jsonResponse({
+          result: false,
+          message: `未知的彩票类型: ${data.lottery_type}`,
+          code: 400
+        }, 400);
+      }
+      updates.push('lottery_type = ?');
+      values.push(data.lottery_type);
+    }
+    
+    if (data.open_time !== undefined) {
+      updates.push('open_time = ?');
+      values.push(data.open_time);
+    }
+    
+    if (data.open_code !== undefined) {
+      updates.push('open_code = ?');
+      values.push(data.open_code);
+    }
+    
+    if (data.zodiac !== undefined) {
+      updates.push('zodiac = ?');
+      values.push(data.zodiac);
+    }
+    
+    if (data.emojis !== undefined) {
+      updates.push('emojis = ?');
+      values.push(data.emojis);
+    }
+    
+    if (data.verify !== undefined) {
+      updates.push('verify = ?');
+      values.push(data.verify ? 1 : 0);
+    }
+    
+    if (data.info !== undefined) {
+      updates.push('info = ?');
+      values.push(data.info);
+    }
+    
+    if (updates.length === 0) {
+      return jsonResponse({
+        result: false,
+        message: '没有提供要更新的字段',
+        code: 400
+      }, 400);
+    }
+    
+    // 添加更新时间和WHERE条件
+    updates.push('updated_at = CURRENT_TIMESTAMP');
+    values.push(expect);
+    
+    const sql = `UPDATE lottery_records SET ${updates.join(', ')} WHERE expect = ?`;
+    const result = await env.DB.prepare(sql).bind(...values).run();
+    
+    if (result.success) {
+      // 获取更新后的记录
+      const updatedRecord = await env.DB.prepare(`
+        SELECT * FROM lottery_records WHERE expect = ?
+      `).bind(expect).first();
+      
+      return jsonResponse({
+        result: true,
+        message: '更新记录成功',
+        code: 200,
+        data: updatedRecord
+      });
+    } else {
+      return jsonResponse({
+        result: false,
+        message: '更新记录失败',
+        code: 500
+      }, 500);
+    }
+    
+  } catch (error) {
+    console.error('更新记录错误:', error);
+    return jsonResponse({
+      result: false,
+      message: '更新记录失败',
+      code: 500,
+      error: error.message
+    }, 500);
+  }
+}
+
+async function handleDeleteRecord(request, env, params) {
+  try {
+    const validation = validateApiKey(request, env);
+    if (!validation.valid) {
+      return jsonResponse({
+        result: false,
+        message: validation.message,
+        code: 401
+      }, 401);
+    }
+    
+    const expect = params.expect;
+    
+    if (!expect) {
+      return jsonResponse({
+        result: false,
+        message: '请提供期号',
+        code: 400
+      }, 400);
+    }
+    
+    // 检查记录是否存在
+    const existing = await env.DB.prepare(
+      'SELECT id, lottery_type, expect, open_time FROM lottery_records WHERE expect = ?'
+    ).bind(expect).first();
+    
+    if (!existing) {
+      return jsonResponse({
+        result: false,
+        message: `找不到期号为 ${expect} 的记录`,
+        code: 404
+      }, 404);
+    }
+    
+    // 执行删除
+    const result = await env.DB.prepare(
+      'DELETE FROM lottery_records WHERE expect = ?'
+    ).bind(expect).run();
+    
+    if (result.success) {
+      return jsonResponse({
+        result: true,
+        message: `成功删除期号为 ${expect} 的记录`,
+        code: 200,
+        deletedRecord: existing
+      });
+    } else {
+      return jsonResponse({
+        result: false,
+        message: '删除记录失败',
+        code: 500
+      }, 500);
+    }
+    
+  } catch (error) {
+    console.error('删除记录错误:', error);
+    return jsonResponse({
+      result: false,
+      message: '删除记录失败',
+      code: 500,
+      error: error.message
+    }, 500);
+  }
+}
+
+async function handleAdminStats(env) {
+  try {
+    // 总体统计
+    const total = await env.DB.prepare('SELECT COUNT(*) as total FROM lottery_records').first();
+    
+    // 按类型统计
+    const byType = await env.DB.prepare(`
+      SELECT 
+        lottery_type,
+        COUNT(*) as count,
+        MIN(open_time) as earliest,
+        MAX(open_time) as latest
+      FROM lottery_records 
+      GROUP BY lottery_type 
+      ORDER BY count DESC
+    `).all();
+    
+    // 按年份统计
+    const byYear = await env.DB.prepare(`
+      SELECT 
+        strftime('%Y', open_time) as year,
+        COUNT(*) as count,
+        GROUP_CONCAT(DISTINCT lottery_type) as types
+      FROM lottery_records 
+      GROUP BY year
+      ORDER BY year DESC
+    `).all();
+    
+    // 最近活跃
+    const recent = await env.DB.prepare(`
+      SELECT 
+        lottery_type,
+        expect,
+        open_time
+      FROM lottery_records 
+      ORDER BY open_time DESC
+      LIMIT 5
+    `).all();
+    
+    // 数据库大小
+    const dbInfo = await env.DB.prepare('PRAGMA page_count').first();
+    
+    return jsonResponse({
+      result: true,
+      message: '统计信息获取成功',
+      code: 200,
+      data: {
+        total: total.total || 0,
+        by_type: byType.results || [],
+        by_year: byYear.results || [],
+        recent: recent.results || [],
+        database: {
+          page_count: dbInfo ? dbInfo.page_count : 0
+        },
+        supported_types: Object.keys(LOTTERY_CONFIG)
+      }
+    });
+    
+  } catch (error) {
+    console.error('获取统计信息错误:', error);
+    return jsonResponse({
+      result: false,
+      message: '获取统计信息失败',
+      code: 500,
+      error: error.message
+    }, 500);
+  }
+}
+
+async function handleBatchDelete(request, env) {
+  try {
+    const validation = validateApiKey(request, env);
+    if (!validation.valid) {
+      return jsonResponse({
+        result: false,
+        message: validation.message,
+        code: 401
+      }, 401);
+    }
+    
+    const data = await request.json();
+    const { records, type, year } = data;
+    
+    if (!records && !type && !year) {
+      return jsonResponse({
+        result: false,
+        message: '请提供要删除的记录、类型或年份',
+        code: 400
+      }, 400);
+    }
+    
+    let result;
+    let message;
+    
+    if (records && Array.isArray(records)) {
+      // 批量删除指定期号
+      let deleted = 0;
+      for (const record of records) {
+        const { lottery_type, expect } = record;
+        if (lottery_type && expect) {
+          await env.DB.prepare(
+            'DELETE FROM lottery_records WHERE lottery_type = ? AND expect = ?'
+          ).bind(lottery_type, expect).run();
+          deleted++;
+        }
+      }
+      message = `批量删除 ${deleted} 条记录成功`;
+    } else if (type && year) {
+      // 删除指定类型和年份的所有记录
+      result = await env.DB.prepare(`
+        DELETE FROM lottery_records 
+        WHERE lottery_type = ? AND strftime('%Y', open_time) = ?
+      `).bind(type, year).run();
+      message = `删除 ${type} ${year}年 所有记录成功`;
+    } else if (type) {
+      // 删除指定类型的所有记录
+      result = await env.DB.prepare(
+        'DELETE FROM lottery_records WHERE lottery_type = ?'
+      ).bind(type).run();
+      message = `删除 ${type} 所有记录成功`;
+    } else if (year) {
+      // 删除指定年份的所有记录
+      result = await env.DB.prepare(`
+        DELETE FROM lottery_records WHERE strftime('%Y', open_time) = ?
+      `).bind(year).run();
+      message = `删除 ${year}年 所有记录成功`;
+    }
+    
+    return jsonResponse({
+      result: true,
+      message,
+      code: 200
+    });
+    
+  } catch (error) {
+    console.error('批量删除错误:', error);
+    return jsonResponse({
+      result: false,
+      message: '批量删除失败',
+      code: 500,
+      error: error.message
+    }, 500);
+  }
+}
+
+// ==================== Telegram 消息发送 ====================
+async function sendTelegramMessage(chatId, text, botToken) {
+  try {
+    const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+    
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: text,
+        parse_mode: 'HTML'
+      })
+    });
+  } catch (error) {
+    console.error('发送Telegram消息错误:', error);
+  }
+}
